@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Next.js dev (app)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "app"],
+      "port": 3000
+    },
+    {
+      "name": "Next.js production (app)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "start", "--prefix", "app"],
+      "port": 3000
+    },
+    {
+      "name": "Vitest watch (app)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "test:watch", "--prefix", "app"],
+      "port": 51204
+    }
+  ]
+}
