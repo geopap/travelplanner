@@ -4,7 +4,7 @@
 **Date:** 2026-04-24
 **Author:** [product-manager]
 **Status:** Active
-**Changelog:** v1.0 — Initial backlog creation (Sprint 0)
+**Changelog:** v1.0 — Initial backlog creation (Sprint 0) · v1.1 — B-001..B-006, B-018 moved to in-progress for Sprint 1
 
 ---
 
