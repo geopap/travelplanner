@@ -40,7 +40,7 @@ interface DeleteState {
   error: string | null;
 }
 
-const ITEMS_LIMIT = 100;
+const ITEMS_PAGE_SIZE = 200;
 
 export function ItineraryView({ tripId }: ItineraryViewProps) {
   const [loadState, setLoadState] = useState<
@@ -51,9 +51,15 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
         role: MemberRole;
         days: TripDay[];
         itemsByDay: Record<string, ItineraryItem[]>;
+        loadedCount: number;
+        totalCount: number;
+        nextPage: number;
       }
     | { status: "error"; message: string }
   >({ status: "loading" });
+
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
 
   const [drawer, setDrawer] = useState<DrawerState | null>(null);
   const [del, setDel] = useState<DeleteState>({
@@ -66,25 +72,24 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
     let cancelled = false;
     async function load() {
       try {
-        const [detail, daysRes] = await Promise.all([
+        // All three fetches are independent — run fully in parallel.
+        const [detail, daysRes, itemsRes] = await Promise.all([
           apiFetch<TripDetailResponse>(`/api/trips/${tripId}`, {
             method: "GET",
           }),
           apiFetch<{ items: TripDay[] }>(`/api/trips/${tripId}/days`, {
             method: "GET",
           }),
+          apiFetch<Paginated<ItineraryItem>>(
+            `/api/trips/${tripId}/items?page=1&limit=${ITEMS_PAGE_SIZE}`,
+            { method: "GET" },
+          ),
         ]);
         if (cancelled) return;
 
         const days = [...daysRes.items].sort(
           (a, b) => a.day_number - b.day_number,
         );
-
-        const itemsRes = await apiFetch<Paginated<ItineraryItem>>(
-          `/api/trips/${tripId}/items?page=1&limit=${ITEMS_LIMIT}`,
-          { method: "GET" },
-        );
-        if (cancelled) return;
 
         const itemsByDay: Record<string, ItineraryItem[]> = {};
         for (const day of days) itemsByDay[day.id] = [];
@@ -104,6 +109,9 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
           role: detail.member.role,
           days,
           itemsByDay,
+          loadedCount: itemsRes.items.length,
+          totalCount: itemsRes.total,
+          nextPage: 2,
         });
       } catch (err) {
         if (cancelled) return;
@@ -121,6 +129,50 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
       cancelled = true;
     };
   }, [tripId]);
+
+  const loadMore = useCallback(async () => {
+    if (loadState.status !== "ready") return;
+    if (loadingMore) return;
+    setLoadingMore(true);
+    setLoadMoreError(null);
+    try {
+      const page = loadState.nextPage;
+      const res = await apiFetch<Paginated<ItineraryItem>>(
+        `/api/trips/${tripId}/items?page=${page}&limit=${ITEMS_PAGE_SIZE}`,
+        { method: "GET" },
+      );
+      setLoadState((s) => {
+        if (s.status !== "ready") return s;
+        const next: Record<string, ItineraryItem[]> = { ...s.itemsByDay };
+        for (const item of res.items) {
+          if (item.day_id && next[item.day_id]) {
+            // Avoid duplicates if the same item was already loaded.
+            if (!next[item.day_id].some((i) => i.id === item.id)) {
+              next[item.day_id] = [...next[item.day_id], item];
+            }
+          }
+        }
+        for (const id of Object.keys(next)) {
+          next[id] = [...next[id]].sort(compareItems);
+        }
+        return {
+          ...s,
+          itemsByDay: next,
+          loadedCount: s.loadedCount + res.items.length,
+          totalCount: res.total,
+          nextPage: page + 1,
+        };
+      });
+    } catch (err) {
+      const message =
+        err instanceof ApiClientError
+          ? err.message
+          : "Could not load more items. Please try again.";
+      setLoadMoreError(message);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadState, loadingMore, tripId]);
 
   const onDayTitleChange = useCallback(
     (dayId: string, title: string | null) => {
@@ -239,7 +291,8 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
     );
   }
 
-  const { trip, role, days, itemsByDay } = loadState;
+  const { trip, role, days, itemsByDay, loadedCount, totalCount } = loadState;
+  const hasMore = loadedCount < totalCount;
 
   return (
     <>
@@ -288,7 +341,6 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
               key={day.id}
               day={day}
               items={itemsByDay[day.id] ?? []}
-              tripId={trip.id}
               role={role}
               onTitleChange={onDayTitleChange}
               onAddItem={openCreate}
@@ -303,6 +355,35 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
               }
             />
           ))}
+
+          {hasMore && (
+            <div
+              role="status"
+              className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/60 p-4 text-sm text-zinc-700 dark:text-zinc-300 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+            >
+              <span>
+                Showing {loadedCount} of {totalCount} items
+              </span>
+              <div className="flex flex-col sm:items-end gap-1">
+                <button
+                  type="button"
+                  onClick={() => void loadMore()}
+                  disabled={loadingMore}
+                  className={secondaryButtonClass}
+                >
+                  {loadingMore ? "Loading…" : "Load more"}
+                </button>
+                {loadMoreError && (
+                  <span
+                    role="alert"
+                    className="text-xs text-red-600 dark:text-red-400"
+                  >
+                    {loadMoreError}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

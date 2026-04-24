@@ -28,6 +28,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     const email = parsed.data.email.toLowerCase();
     const emailHash = createHash('sha256').update(email).digest('hex').slice(0, 16);
+    // WARNING: in-memory, per-instance — Upstash in Phase B.
     const rl = checkRateLimit(`pwreset:${emailHash}`, WINDOW_MS, MAX_PER_WINDOW);
     if (!rl.ok) return rateLimited(rl.retryAfterMs);
 

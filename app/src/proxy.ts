@@ -24,7 +24,6 @@ function jsonUnauthorized(): NextResponse {
 
 export async function proxy(request: NextRequest): Promise<NextResponse> {
   const { supabase, response } = createSupabaseMiddlewareClient(request);
-  const { data } = await supabase.auth.getUser();
   const pathname = request.nextUrl.pathname;
 
   const isProtectedPage = PROTECTED_PAGE_PREFIXES.some((p) =>
@@ -34,7 +33,16 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     pathname === p || pathname.startsWith(`${p}/`),
   );
 
-  if (!data.user && (isProtectedPage || isProtectedApi)) {
+  let userPresent = false;
+  try {
+    const { data, error } = await supabase.auth.getUser();
+    // Treat any error (expired/invalid token, network) as unauthenticated.
+    userPresent = !error && Boolean(data.user);
+  } catch {
+    userPresent = false;
+  }
+
+  if (!userPresent && (isProtectedPage || isProtectedApi)) {
     return isApiPath(pathname) ? jsonUnauthorized() : redirectToSignIn(request);
   }
   return response;

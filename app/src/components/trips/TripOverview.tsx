@@ -38,6 +38,7 @@ export function TripOverview({ tripId }: TripOverviewProps) {
     trip?: Trip;
     role?: MemberRole;
     dayCount?: number;
+    dayCountFallback?: boolean;
     error?: string;
   }>({ status: "loading" });
 
@@ -49,28 +50,39 @@ export function TripOverview({ tripId }: TripOverviewProps) {
     let cancelled = false;
     async function load() {
       try {
-        const detail = await apiFetch<TripDetailResponse>(
+        // Fetch detail and days in parallel — they are independent.
+        const detailPromise = apiFetch<TripDetailResponse>(
           `/api/trips/${tripId}`,
           { method: "GET" },
         );
+        const daysPromise = apiFetch<{ items: TripDay[] }>(
+          `/api/trips/${tripId}/days`,
+          { method: "GET" },
+        ).then(
+          (res) => ({ ok: true as const, items: res.items }),
+          (err: unknown) => ({ ok: false as const, err }),
+        );
+        const [detail, daysOutcome] = await Promise.all([
+          detailPromise,
+          daysPromise,
+        ]);
         if (cancelled) return;
-        // Fetch day count in parallel via /days endpoint.
-        let dayCount = 0;
-        try {
-          const days = await apiFetch<{ items: TripDay[] }>(
-            `/api/trips/${tripId}/days`,
-            { method: "GET" },
-          );
-          if (cancelled) return;
-          dayCount = days.items.length;
-        } catch {
+
+        let dayCount: number;
+        let dayCountFallback = false;
+        if (daysOutcome.ok) {
+          dayCount = daysOutcome.items.length;
+        } else {
           dayCount = daysBetween(detail.trip.start_date, detail.trip.end_date);
+          dayCountFallback = true;
         }
+
         setState({
           status: "ready",
           trip: detail.trip,
           role: detail.member.role,
           dayCount,
+          dayCountFallback,
         });
       } catch (err) {
         if (cancelled) return;
@@ -138,7 +150,7 @@ export function TripOverview({ tripId }: TripOverviewProps) {
     );
   }
 
-  const { trip, role, dayCount } = state;
+  const { trip, role, dayCount, dayCountFallback } = state;
   const canEdit = role === "owner" || role === "editor";
   const canDelete = role === "owner";
 
@@ -186,6 +198,11 @@ export function TripOverview({ tripId }: TripOverviewProps) {
         <Stat
           label="Duration"
           value={`${dayCount ?? daysBetween(trip.start_date, trip.end_date)} days`}
+          note={
+            dayCountFallback
+              ? "Could not load days — showing computed count"
+              : undefined
+          }
         />
         <Stat
           label="Budget"
@@ -237,7 +254,15 @@ export function TripOverview({ tripId }: TripOverviewProps) {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({
+  label,
+  value,
+  note,
+}: {
+  label: string;
+  value: string;
+  note?: string;
+}) {
   return (
     <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
       <dt className="text-xs uppercase tracking-wide text-zinc-500">
@@ -246,6 +271,11 @@ function Stat({ label, value }: { label: string; value: string }) {
       <dd className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-50">
         {value}
       </dd>
+      {note && (
+        <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+          {note}
+        </p>
+      )}
     </div>
   );
 }

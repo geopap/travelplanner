@@ -15,18 +15,46 @@ import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
 import type { ItineraryItem } from '@/lib/types/domain';
 
-type RouteCtx = {
-  params: Promise<{ id: string; dayId: string; itemId: string }>;
-};
+type RouteCtx = { params: Promise<{ id: string; itemId: string }> };
+
+export async function GET(
+  _req: NextRequest,
+  ctx: RouteCtx,
+): Promise<NextResponse> {
+  try {
+    const { id, itemId } = await ctx.params;
+    if (!UuidSchema.safeParse(id).success) return notFound();
+    if (!UuidSchema.safeParse(itemId).success) return notFound();
+
+    const supabase = await createSupabaseServerClient();
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) return unauthorized();
+
+    const access = await checkTripAccess(supabase, id, auth.user.id, 'viewer');
+    if (!access.ok) return notFound();
+
+    const { data, error } = await supabase
+      .from('itinerary_items')
+      .select('*')
+      .eq('id', itemId)
+      .eq('trip_id', id)
+      .maybeSingle();
+    if (error) return serverError();
+    if (!data) return notFound();
+
+    return NextResponse.json({ item: data as ItineraryItem });
+  } catch {
+    return serverError();
+  }
+}
 
 export async function PATCH(
   request: NextRequest,
   ctx: RouteCtx,
 ): Promise<NextResponse> {
   try {
-    const { id, dayId, itemId } = await ctx.params;
+    const { id, itemId } = await ctx.params;
     if (!UuidSchema.safeParse(id).success) return notFound();
-    if (!UuidSchema.safeParse(dayId).success) return notFound();
     if (!UuidSchema.safeParse(itemId).success) return notFound();
 
     const supabase = await createSupabaseServerClient();
@@ -48,17 +76,17 @@ export async function PATCH(
     if (!parsed.success) return validationError(parsed.error);
     const input = parsed.data;
 
-    // If caller tries to move item to a different day_id, verify that day is
-    // still under the same trip.
-    if (input.day_id && input.day_id !== dayId) {
-      const { data: ok, error: dayErr } = await supabase
+    // If caller moves item to a different day_id, verify that day belongs to
+    // the same trip. trip_id is never accepted from the body — it's fixed by URL.
+    if (input.day_id) {
+      const { data: dayRow, error: dayErr } = await supabase
         .from('trip_days')
         .select('id')
         .eq('id', input.day_id)
         .eq('trip_id', id)
         .maybeSingle();
       if (dayErr) return serverError();
-      if (!ok) return badRequest('Target day does not belong to this trip');
+      if (!dayRow) return badRequest('Target day does not belong to this trip');
     }
 
     const updatePayload: Record<string, unknown> = {};
@@ -66,13 +94,11 @@ export async function PATCH(
       if (input[key] !== undefined) updatePayload[key] = input[key];
     }
 
-    // trip_id is never accepted from the body — it's fixed by URL.
     const { data, error } = await supabase
       .from('itinerary_items')
       .update(updatePayload)
       .eq('id', itemId)
       .eq('trip_id', id)
-      .eq('day_id', dayId)
       .select('*')
       .maybeSingle();
     if (error) return serverError();
@@ -98,9 +124,8 @@ export async function DELETE(
   ctx: RouteCtx,
 ): Promise<NextResponse> {
   try {
-    const { id, dayId, itemId } = await ctx.params;
+    const { id, itemId } = await ctx.params;
     if (!UuidSchema.safeParse(id).success) return notFound();
-    if (!UuidSchema.safeParse(dayId).success) return notFound();
     if (!UuidSchema.safeParse(itemId).success) return notFound();
 
     const supabase = await createSupabaseServerClient();
@@ -117,7 +142,6 @@ export async function DELETE(
       .delete()
       .eq('id', itemId)
       .eq('trip_id', id)
-      .eq('day_id', dayId)
       .select('id')
       .maybeSingle();
     if (error) return serverError();

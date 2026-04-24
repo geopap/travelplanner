@@ -28,6 +28,7 @@ export function ConfirmDeleteDialog({
   const [typed, setTyped] = useState("");
   const [prevOpen, setPrevOpen] = useState(open);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   // Derive: when `open` transitions, reset typed value. React 19-safe
   // "update state from props" pattern.
@@ -44,8 +45,41 @@ export function ConfirmDeleteDialog({
 
   useEffect(() => {
     if (!open) return;
+    function getFocusable(): HTMLElement[] {
+      const root = dialogRef.current;
+      if (!root) return [];
+      const selector =
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+      return Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(
+        (el) => !el.hasAttribute("aria-hidden"),
+      );
+    }
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onCancel();
+      if (e.key === "Escape") {
+        onCancel();
+        return;
+      }
+      if (e.key === "Tab") {
+        const focusables = getFocusable();
+        if (focusables.length === 0) {
+          e.preventDefault();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (e.shiftKey) {
+          if (active === first || !dialogRef.current?.contains(active)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (active === last || !dialogRef.current?.contains(active)) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -64,7 +98,10 @@ export function ConfirmDeleteDialog({
       aria-labelledby="confirm-delete-title"
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
     >
-      <div className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 shadow-xl border border-zinc-200 dark:border-zinc-800 p-6">
+      <div
+        ref={dialogRef}
+        className="w-full max-w-md rounded-2xl bg-white dark:bg-zinc-900 shadow-xl border border-zinc-200 dark:border-zinc-800 p-6"
+      >
         <h2
           id="confirm-delete-title"
           className="text-lg font-semibold text-zinc-900 dark:text-zinc-50"

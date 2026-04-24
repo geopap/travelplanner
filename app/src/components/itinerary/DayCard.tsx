@@ -10,7 +10,6 @@ import { ItineraryItemCard } from "./ItineraryItemCard";
 interface DayCardProps {
   day: TripDay;
   items: ItineraryItem[];
-  tripId: string;
   role: MemberRole;
   onTitleChange: (dayId: string, title: string | null) => void;
   onAddItem: (dayId: string) => void;
@@ -21,14 +20,12 @@ interface DayCardProps {
 export function DayCard({
   day,
   items,
-  tripId: _tripId,
   role,
   onTitleChange,
   onAddItem,
   onEditItem,
   onDeleteItem,
 }: DayCardProps) {
-  void _tripId; // reserved for future per-item operations that need tripId
   const canEdit = role === "owner" || role === "editor";
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(day.title ?? "");

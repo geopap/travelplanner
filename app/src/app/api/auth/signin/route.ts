@@ -15,6 +15,7 @@ import { logAudit } from '@/lib/audit';
 
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_FAILED = 5;
+const IP_MAX_PER_WINDOW = 30;
 
 function emailKey(ip: string, email: string): string {
   const hash = createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0, 16);
@@ -24,6 +25,11 @@ function emailKey(ip: string, email: string): string {
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const ip = getClientIp(request);
+
+    // Coarse per-IP gate (fail-closed when IP unknown — conservative bucket).
+    // WARNING: in-memory, per-instance — Upstash in Phase B.
+    const ipRl = checkRateLimit(`signin:ip:${ip}`, WINDOW_MS, IP_MAX_PER_WINDOW);
+    if (!ipRl.ok) return rateLimited(ipRl.retryAfterMs);
 
     let body: unknown;
     try {
@@ -38,6 +44,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     const key = emailKey(ip, email);
     // Rate limit: if already at/over MAX_FAILED failures in window, lock out.
+    // WARNING: in-memory, per-instance — Upstash in Phase B.
     const rl = checkRateLimit(`${key}:gate`, WINDOW_MS, MAX_FAILED);
     if (!rl.ok) return rateLimited(rl.retryAfterMs);
 

@@ -4,8 +4,6 @@ import { SignupInput } from '@/lib/validations/auth';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import {
   badRequest,
-  conflict,
-  errorResponse,
   rateLimited,
   serverError,
   validationError,
@@ -19,6 +17,7 @@ const MAX_PER_WINDOW = 5;
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const ip = getClientIp(request);
+    // WARNING: in-memory, per-instance — Upstash in Phase B.
     const rl = checkRateLimit(`signup:${ip}`, WINDOW_MS, MAX_PER_WINDOW);
     if (!rl.ok) return rateLimited(rl.retryAfterMs);
 
@@ -45,30 +44,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       },
     });
 
-    if (error) {
-      // Generic response — do not leak whether an account exists.
-      if (
-        error.status === 400 ||
-        error.status === 422 ||
-        error.message.toLowerCase().includes('already')
-      ) {
-        return conflict(
-          'Email already registered or invalid',
-          { code: 'email_taken_or_invalid' },
-        );
-      }
-      return errorResponse('server_error', 'Sign-up failed', 500);
-    }
-
-    const userId = data.user?.id ?? null;
+    // Uniform response regardless of outcome to preserve anti-enumeration
+    // guarantees. Supabase already refuses to disclose duplicates; we mirror
+    // that behaviour at the API layer by never branching the response shape.
+    const userId = data?.user?.id ?? null;
     await logAudit({
       actorId: userId,
       action: 'signup',
       entity: 'auth.users',
       entityId: userId,
+      metadata: { ok: !error },
     });
 
-    return NextResponse.json({ user_id: userId }, { status: 201 });
+    return NextResponse.json({ ok: true }, { status: 200 });
   } catch {
     return serverError();
   }

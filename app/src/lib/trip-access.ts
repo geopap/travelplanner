@@ -41,7 +41,17 @@ export async function checkTripAccess(
   }
   if (!data) return { ok: false, reason: 'not_found' };
 
-  const role = data.role as MemberRole;
+  const VALID_ROLES = ['owner', 'editor', 'viewer'] as const;
+  const candidate: unknown = data.role;
+  if (
+    typeof candidate !== 'string' ||
+    !(VALID_ROLES as readonly string[]).includes(candidate)
+  ) {
+    // DB invariant violation — role column is CHECK-constrained at schema level.
+    // Fail closed: treat as no access rather than casting blindly.
+    return { ok: false, reason: 'forbidden' };
+  }
+  const role = candidate as MemberRole;
   if (!roleSatisfies(role, required)) {
     return { ok: false, reason: 'forbidden' };
   }

@@ -1,3 +1,4 @@
+import 'server-only';
 import { createSupabaseServiceClient } from './supabase/service';
 
 export type AuditAction =
@@ -55,12 +56,8 @@ export async function logAudit(params: AuditParams): Promise<void> {
       metadata: params.metadata ?? {},
     });
     if (error) {
-      // audit_log table may not exist in Sprint 1 (baseline migration includes
-      // profiles..itinerary_items, not audit_log). Swallow silently if so.
-      if (error.code !== '42P01') {
-        // eslint-disable-next-line no-console
-        console.warn(JSON.stringify({ level: 'audit_warn', error: error.message }));
-      }
+      // eslint-disable-next-line no-console
+      console.warn(JSON.stringify({ level: 'audit_warn', error: error.message }));
     }
   } catch (err) {
     // eslint-disable-next-line no-console

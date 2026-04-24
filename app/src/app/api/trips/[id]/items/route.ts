@@ -1,7 +1,11 @@
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
-import { UuidSchema, PageSchema } from '@/lib/validations/common';
-import { CreateItineraryItemInput } from '@/lib/validations/itinerary-items';
+import { z } from 'zod';
+import { UuidSchema } from '@/lib/validations/common';
+import {
+  CreateItineraryItemInput,
+  ItineraryItemType,
+} from '@/lib/validations/itinerary-items';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import {
   badRequest,
@@ -15,7 +19,17 @@ import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
 import type { ItineraryItem } from '@/lib/types/domain';
 
-type RouteCtx = { params: Promise<{ id: string; dayId: string }> };
+type RouteCtx = { params: Promise<{ id: string }> };
+
+/**
+ * Items list/create pagination — cap at 200 (per spec §3.2). This is wider
+ * than the default PageSchema (100) because a single trip-day can legitimately
+ * contain many items; callers still paginate.
+ */
+const ItemsPageSchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
 
 async function verifyDayBelongsToTrip(
   supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
@@ -36,9 +50,8 @@ export async function GET(
   ctx: RouteCtx,
 ): Promise<NextResponse> {
   try {
-    const { id, dayId } = await ctx.params;
+    const { id } = await ctx.params;
     if (!UuidSchema.safeParse(id).success) return notFound();
-    if (!UuidSchema.safeParse(dayId).success) return notFound();
 
     const supabase = await createSupabaseServerClient();
     const { data: auth } = await supabase.auth.getUser();
@@ -47,10 +60,30 @@ export async function GET(
     const access = await checkTripAccess(supabase, id, auth.user.id, 'viewer');
     if (!access.ok) return notFound();
 
-    if (!(await verifyDayBelongsToTrip(supabase, id, dayId))) return notFound();
-
     const url = new URL(request.url);
-    const pageParsed = PageSchema.safeParse({
+
+    // Optional day_id filter.
+    const dayIdParam = url.searchParams.get('day_id');
+    let dayIdFilter: string | null = null;
+    if (dayIdParam !== null && dayIdParam !== '') {
+      const dayParsed = UuidSchema.safeParse(dayIdParam);
+      if (!dayParsed.success) return badRequest('Invalid day_id');
+      if (!(await verifyDayBelongsToTrip(supabase, id, dayParsed.data))) {
+        return notFound();
+      }
+      dayIdFilter = dayParsed.data;
+    }
+
+    // Optional type filter.
+    const typeParam = url.searchParams.get('type');
+    let typeFilter: string | null = null;
+    if (typeParam !== null && typeParam !== '') {
+      const typeParsed = ItineraryItemType.safeParse(typeParam);
+      if (!typeParsed.success) return badRequest('Invalid type');
+      typeFilter = typeParsed.data;
+    }
+
+    const pageParsed = ItemsPageSchema.safeParse({
       page: url.searchParams.get('page') ?? undefined,
       limit: url.searchParams.get('limit') ?? undefined,
     });
@@ -60,11 +93,14 @@ export async function GET(
     const from = (page - 1) * limit;
     const to = from + limit - 1;
 
-    const { data, error, count } = await supabase
+    let query = supabase
       .from('itinerary_items')
       .select('*', { count: 'exact' })
-      .eq('trip_id', id)
-      .eq('day_id', dayId)
+      .eq('trip_id', id);
+    if (dayIdFilter !== null) query = query.eq('day_id', dayIdFilter);
+    if (typeFilter !== null) query = query.eq('type', typeFilter);
+
+    const { data, error, count } = await query
       .order('start_time', { ascending: true, nullsFirst: false })
       .order('created_at', { ascending: true })
       .range(from, to);
@@ -86,9 +122,8 @@ export async function POST(
   ctx: RouteCtx,
 ): Promise<NextResponse> {
   try {
-    const { id, dayId } = await ctx.params;
+    const { id } = await ctx.params;
     if (!UuidSchema.safeParse(id).success) return notFound();
-    if (!UuidSchema.safeParse(dayId).success) return notFound();
 
     const supabase = await createSupabaseServerClient();
     const { data: auth } = await supabase.auth.getUser();
@@ -98,8 +133,6 @@ export async function POST(
     if (!access.ok) {
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
-
-    if (!(await verifyDayBelongsToTrip(supabase, id, dayId))) return notFound();
 
     let body: unknown;
     try {
@@ -111,12 +144,20 @@ export async function POST(
     if (!parsed.success) return validationError(parsed.error);
     const input = parsed.data;
 
-    // Server sets trip_id + day_id from URL — never from body (B-006 AC 7).
+    // day_id is required in the flat contract — the URL no longer carries it.
+    if (!input.day_id) {
+      return badRequest('day_id is required');
+    }
+    if (!(await verifyDayBelongsToTrip(supabase, id, input.day_id))) {
+      return badRequest('Target day does not belong to this trip');
+    }
+
+    // Server sets trip_id from URL — never from body.
     const { data, error } = await supabase
       .from('itinerary_items')
       .insert({
         trip_id: id,
-        day_id: dayId,
+        day_id: input.day_id,
         type: input.type,
         start_time: input.start_time ?? null,
         end_time: input.end_time ?? null,
@@ -137,7 +178,7 @@ export async function POST(
       entity: 'itinerary_items',
       entityId: data.id,
       tripId: id,
-      metadata: { type: input.type, day_id: dayId },
+      metadata: { type: input.type, day_id: input.day_id },
     });
 
     return NextResponse.json({ item: data as ItineraryItem }, { status: 201 });
