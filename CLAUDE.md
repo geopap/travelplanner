@@ -8,6 +8,8 @@ TravelPlanner is a personal travel planning app. Users create trips, define date
 
 **Project directory**: `/Users/george/travelplanner/`. The Next.js application lives in `app/`. Supabase migrations live in `app/supabase/migrations/`.
 
+**Personal-project scope**: No analytics/tracking, no marketing/SEO/content, no user manual. Single environment (Vercel production). The user is the sole user and the sole UAT tester.
+
 ## Git
 
 When using git, always use `/usr/bin/git` (system git) instead of Homebrew git to avoid libcurl compatibility issues. If `git push` fails with a curl error, immediately fall back to `/usr/bin/git push` or `gh` CLI without asking.
@@ -28,294 +30,198 @@ Always confirm you are reading files from the correct project directory before r
 
 ## Agent Bracket Notation — MANDATORY
 
-**Every message, reply, and status update MUST start with the relevant agent name in brackets.** This is the first thing the user sees — it tells them which agent is working.
+**Every message, reply, and status update MUST start with the relevant agent name in brackets.**
 
 **Format**: `[agent-name] <message>`
 
-**Examples**:
-- `[scrum-master] Sprint 1 has 5 active items. Next action: launch [frontend-engineer] for B-004.`
-- `[frontend-engineer] Implementing trip creation form. Files changed: ...`
-- `[code-reviewer] Reviewing B-004. Found 2 HIGH issues: ...`
-- `[tester] UAT results for B-004: PASS (5/5 test cases passed)`
-
 **Rules**:
 - Start EVERY response with `[agent-name]` — no exceptions
-- When multiple agents are referenced, lead with the primary agent doing the current work
 - When reporting on another agent's output, use their bracket: `[security-reviewer] found 3 issues`
 - When orchestrating, lead with `[scrum-master]`
-- Never write a response without an agent bracket at the beginning
 
-## 17-Agent Roster
+## 10-Agent Roster
 
 | # | Agent | Round | Writes Code? | Files Owned |
 |---|-------|-------|-------------|-------------|
 | 1 | [scrum-master] | All | No | SPRINT.md |
-| 2 | [product-manager] | R1 | No | PRD.md, BACKLOG.md, BUSINESS_PLAN.md |
-| 3 | [data-analyst] | R1 | No | (tracking plans integrated into PRD) |
-| 4 | [marketing-manager] | R1 + R8 | No | MARKETING_PLAN.md |
-| 5 | [solution-architect] | R2 + R7 | No | SOLUTION_DESIGN.md |
-| 6 | [backend-engineer] | R3 | Yes | `app/src/app/api/`, `app/supabase/migrations/`, `app/src/lib/supabase/`, `app/src/lib/validations/` |
-| 7 | [ai-ml-engineer] | R3 | Yes | `app/src/lib/ai/` (reserved — empty in v1; activated when AI features are added) |
-| 8 | [frontend-engineer] | R4 | Yes | `app/src/components/`, `app/src/app/` (non-api routes), `app/src/lib/hooks/`, `app/src/lib/utils/` |
-| 9 | [seo-reviewer] | R5 | No | (reports findings) |
-| 10 | [code-reviewer] | R5 | No | (reports findings) |
-| 11 | [security-reviewer] | R5 | No | (reports findings) |
-| 12 | [qa-reviewer] | R5 | No | (reports findings) |
-| 13 | [test-engineer] | R6 | Yes | `app/e2e/`, `app/src/__tests__/` |
-| 14 | [tester] | R6 | No | (test reports) |
-| 15 | [content-creator] | R8+ | No | (content per briefs) |
-| 16 | [technical-writer] | R8 | No | `docs/user-manual/` |
-| 17 | [release-manager] | Sprint Close | No | GitHub Releases (via `gh` CLI) |
+| 2 | [product-manager] | R1 | No | PRD.md, BACKLOG.md |
+| 3 | [solution-architect] | R2 | No | SOLUTION_DESIGN.md |
+| 4 | [backend-engineer] | R3 | Yes | `app/src/app/api/`, `app/supabase/migrations/`, `app/src/lib/supabase/`, `app/src/lib/validations/` |
+| 5 | [frontend-engineer] | R3 | Yes | `app/src/components/`, `app/src/app/` (non-api), `app/src/lib/hooks/`, `app/src/lib/utils/` |
+| 6 | [code-reviewer] | R4 | No | (findings) |
+| 7 | [security-reviewer] | R4 | No | (findings) |
+| 8 | [test-engineer] | R5 | Yes | `app/e2e/`, `app/src/__tests__/` |
+| 9 | [tester] | R5 | No | (UAT reports) |
+| 10 | [release-manager] | Sprint Close | No | GitHub Releases via `gh` |
 
 ## Agent Model Assignments
 
-**[scrum-master] MUST use these model assignments when launching agents via the Agent tool.** The goal is to keep Opus for high-stakes reasoning where errors cascade or are irreversible, and use Sonnet for pattern-following, checklist-driven, and structured-output agents.
+**[scrum-master] MUST use these model assignments when launching agents.**
 
-### Opus (7 agents) — Architecture, security, orchestration, all engineers
+### Opus (6 agents) — Architecture, security, all engineers
+- [scrum-master] — pipeline orchestration
+- [solution-architect] — schema + API contracts
+- [security-reviewer] — auth/RLS correctness
+- [backend-engineer] — auth guards, data isolation
+- [frontend-engineer] — state, responsive UI
+- [test-engineer] — edge cases, isolation tests
 
-| Agent | Model | Why Opus |
-|-------|-------|----------|
-| [scrum-master] | `model: "opus"` | Pipeline orchestration errors cascade to all agents. Enforces 8 gates, 3 tiers, parallelization decisions. |
-| [solution-architect] | `model: "opus"` | Foundational decisions (DB schema, API contracts) are expensive to reverse. Bookends pipeline at R2 + R7. |
-| [security-reviewer] | `model: "opus"` | Auth/security review quality is non-negotiable. Asymmetric risk: missed vulnerability >> saved tokens. |
-| [backend-engineer] | `model: "opus"` | Security-sensitive code (auth guards, data isolation). Highest correctness bar. |
-| [ai-ml-engineer] | `model: "opus"` | Most complex code (orchestration, pipelines, validation). Architectural novelty. |
-| [frontend-engineer] | `model: "opus"` | Largest code output. Complex state management, responsive UI. |
-| [test-engineer] | `model: "opus"` | Test quality determines what bugs ship. Edge cases, isolation tests. |
+### Sonnet (4 agents) — Structured output, checklists
+- [product-manager] — user stories, ACs, backlog
+- [code-reviewer] — checklist-driven review (TS strict, patterns, perf, a11y — absorbs former qa-reviewer scope)
+- [tester] — scripted UAT PASS/FAIL
+- [release-manager] — checklist-driven release
 
-### Sonnet (10 agents) — Structured analysis, checklists, content, documentation, releases
+## Sprint Execution Pipeline (5 Rounds)
 
-| Agent | Model | Why Sonnet is sufficient |
-|-------|-------|------------------------|
-| [code-reviewer] | `model: "sonnet"` | Checklist-driven pattern recognition. Opus [security-reviewer] provides overlapping coverage. |
-| [qa-reviewer] | `model: "sonnet"` | Checklist-driven (TypeScript strictness, error handling, accessibility). Three other R5 reviewers overlap. |
-| [product-manager] | `model: "sonnet"` | Structured output (user stories, ACs, backlog tables). [solution-architect] validates in R2. |
-| [data-analyst] | `model: "sonnet"` | Highly structured output (event schemas, KPI tables). PM reviews before handoff. |
-| [marketing-manager] | `model: "sonnet"` | Structured strategic output with pre-defined framework. User reviews all plans. |
-| [seo-reviewer] | `model: "sonnet"` | Most checklist-driven agent. SEO findings are LOW-MEDIUM severity. |
-| [tester] | `model: "sonnet"` | Follows test scripts with structured PASS/FAIL output. User is ultimate UX judge. |
-| [content-creator] | `model: "sonnet"` | Marketing copy follows brand voice guidelines. [marketing-manager] reviews all content. |
-| [technical-writer] | `model: "sonnet"` | Structured documentation following templates. User reviews all output. |
-| [release-manager] | `model: "sonnet"` | Checklist-driven release process. User approves every destructive action. |
-
-### Quality safety net ("Opus Trident")
-
-Every piece of Sonnet-generated code or documentation passes through at least one Opus agent before it can be marked done:
-- **[scrum-master]** — Process quality (every gate, every handoff)
-- **[solution-architect]** — Architecture quality (R2 design + R7 close verification)
-- **[security-reviewer]** — Security quality (R5 validation of all code)
-
-## Sprint Execution Pipeline (8 Rounds)
-
-Execute this pipeline automatically for every sprint item. The [scrum-master] orchestrates between rounds. **The pipeline is tiered by effort size — see Pipeline Tiers below.**
+Execute this pipeline for every sprint item. The [scrum-master] orchestrates.
 
 ```
-ROUND 1 — DEFINITION    🔀 [product-manager] + [data-analyst] + [marketing-manager]* (PARALLEL)
-ROUND 2 — ARCHITECTURE  ➡️ [solution-architect] (sequential)
-ROUND 3 — BUILD          🔀 [backend-engineer] + [ai-ml-engineer]** (PARALLEL)
-ROUND 4 — BUILD          ➡️ [frontend-engineer] (sequential, needs API contracts from R3)
-ROUND 5 — REVIEW         🔀 [seo-reviewer] + [code-reviewer] + [security-reviewer] + [qa-reviewer] (PARALLEL)
-ROUND 6 — TESTING        ➡️ [test-engineer] → [tester] (sequential)
-ROUND 7 — CLOSE          ➡️ [solution-architect] updates SOLUTION_DESIGN.md
-ROUND 8 — POST-CLOSE     🔀 [marketing-manager]* + [technical-writer]** (PARALLEL, both optional)
+R1 — DEFINITION     ➡️ [product-manager]
+R2 — ARCHITECTURE   ➡️ [solution-architect]  (skipped on Fast Track)
+R3 — BUILD           🔀 [backend-engineer] + [frontend-engineer]  (parallel when API contracts stable; else backend first)
+R4 — REVIEW          🔀 [code-reviewer] + [security-reviewer]  (parallel)
+R5 — TESTING        ➡️ [test-engineer] → [tester]
 ```
 
-**Sprint-level step (after all per-item rounds complete):**
+**Sprint-level step (after all items complete):**
 ```
-SPRINT CLOSE — Gate 4 → Gate 7 retrospective → [release-manager] release → archive
+SPRINT CLOSE — Gate 4 release checklist → [release-manager] release → archive
 ```
 
-**Pipeline rules:**
-- `*` [marketing-manager] is optional in R1 and R8 — include only for user-facing features
-- `**` [technical-writer] is optional in R8 — include only for items that change the user experience
-- `**` [backend-engineer] + [ai-ml-engineer] can run in parallel only if they work on different DB tables; otherwise sequence backend first
-- [scrum-master] runs between every round: updates SPRINT.md, routes context to the next agent(s), identifies parallel opportunities
-- Parallel agents (🔀) MUST be launched simultaneously using multiple Agent tool calls in a single message
-- Sequential agents (➡️) wait for the previous round to complete before starting
-- Review agents (R5) report findings only — they do NOT write code. Engineers fix findings before proceeding to R6.
-- All automated tests (R6 test-engineer) must pass before [tester] UAT begins
-- [release-manager] runs once per sprint (not per item) — after Gate 7 retrospective passes, before SPRINT_ARCHIVE.md archiving.
+**Rules:**
+- [solution-architect] updates SOLUTION_DESIGN.md **inline during R2 and at sprint close** (no separate R7).
+- Parallel agents (🔀) launched simultaneously via multiple Agent tool calls in one message.
+- Review agents report findings only — engineers fix CRITICAL/HIGH before R5.
+- All automated tests pass before [tester] UAT.
+- [release-manager] runs once per sprint.
 
 ## Pipeline Tiers
 
-**The pipeline is sized to the item.** Before starting R1, the [scrum-master] reads the effort tag from BACKLOG.md and declares the tier in the SPRINT.md item.
+**Sized to the item.** [scrum-master] declares tier in SPRINT.md before R1.
 
-### Tier 1: Fast Track (Effort: XS or S)
-Small items — bug fixes, CSS tweaks, minor UI changes, copy updates, single-endpoint additions.
+### Tier 1: Fast Track (XS/S) — DEFAULT
+Bug fixes, CSS tweaks, copy updates, single-endpoint additions.
 
 ```
-R1  — DEFINITION  ➡️ [product-manager] only
-R3/4 — BUILD      🔀 Build agents as needed
-R5  — REVIEW      🔀 [code-reviewer] + [security-reviewer] only
+R1 — [product-manager]
+R3 — Build
+R4 — [code-reviewer] + [security-reviewer]
+R5 — [tester] smoke (skip test-engineer unless logic-heavy)
 → DONE
 ```
 
-**Skipped:** R2 Architecture · [data-analyst] · [marketing-manager] · [seo-reviewer] · [qa-reviewer] · R6 Testing · R7 Close · R8 Post-Close
+**Skipped:** R2 architecture, test-engineer (unless new logic paths).
+**Non-negotiable:** code-reviewer + security-reviewer always run. Existing test suite must pass.
+**Auto-upgrade:** If item adds DB tables, new API routes, or cross-cutting auth changes → upgrade to Full.
 
-**Non-negotiable even on Fast Track:**
-- [code-reviewer] and [security-reviewer] always run
-- Existing test suite MUST pass — zero regressions before marking done
-- All code standards apply: TypeScript strict, no TODOs
+### Tier 2: Full Pipeline (M/L)
+All 5 rounds, all mandatory gates.
 
-**Auto-upgrade rule:** If an XS/S item introduces new DB tables, new API routes, or cross-cutting security changes → upgrade to Full (M) tier before build.
-
-### Tier 2: Full Pipeline (Effort: M or L)
-Standard items — run all 8 rounds. All mandatory gates apply.
-
-### Tier 3: Spike-First (Effort: XL)
-High-complexity items — major architectural changes, new subsystems.
-
-```
-R0 — SPIKE    ➡️ [solution-architect] discovery spike (before R1)
-R1–R8 — Full pipeline (all rounds, all mandatory gates)
-```
+### Tier 3: Spike-First (XL)
+R0 discovery spike by [solution-architect] → then Full.
 
 **Enforcement:**
-- [scrum-master] MUST record `**Tier**` in the SPRINT.md item at creation
-- Tier is determined by effort tag: XS/S → Fast Track · M/L → Full · XL → Spike-First
-- If scope expands mid-sprint: [scrum-master] reassesses tier and updates SPRINT.md
+- `**Tier**` recorded in SPRINT.md at item creation.
+- XS/S → Fast Track · M/L → Full · XL → Spike-First.
 
-## MANDATORY PIPELINE GATES — NEVER SKIP
+## MANDATORY PIPELINE GATES
 
-### Gate 1: Review Gate (R5)
-After R3-R4 build rounds complete, launch ALL FOUR reviewers before proceeding. Engineers MUST fix all CRITICAL and HIGH findings before R6.
+### Gate 1: Review (R4)
+Launch both reviewers in parallel after build. Engineers fix all CRITICAL and HIGH before R5.
 
-### Gate 2: Testing Gate (R6)
-[test-engineer] writes automated tests; [tester] performs manual UAT — PASS/FAIL/WARN/SKIP per test case.
+### Gate 2: Testing (R5)
+[test-engineer] writes automated tests; [tester] performs UAT — PASS/FAIL/WARN/SKIP per case.
 
-### Gate 3: UAT Acceptance Gate
-Every sprint item must have [tester] UAT results with status PASS in SPRINT.md before the sprint can close.
+### Gate 3: UAT Acceptance
+Every sprint item must have [tester] UAT status PASS in SPRINT.md before sprint can close.
 
-### Gate 4: Release Checklist (R7 Close)
-The [scrum-master] verifies:
-- ✅ All R5 review findings resolved
-- ✅ All R6 automated tests passing
-- ✅ UAT sign-off received from [tester]
-- ✅ No open blockers in SPRINT.md
-- ✅ SOLUTION_DESIGN.md updated
-- ✅ Database migrations reviewed and safe to deploy
-- ✅ Rollback plan documented for all DB migrations and breaking API changes
-- ✅ All new API endpoints documented in SOLUTION_DESIGN.md
-- ✅ All new env vars added to `.env.example` with descriptions
-- ✅ Runbook stubs written for any new background job, cron, or async pipeline
-- ✅ Build deviations from R2 architecture plan documented
-- ✅ User manual updated for user-facing features
-- ✅ BACKLOG.md updated — all completed items set to `done`
-- ✅ BACKLOG_BOARD.md updated
-- ✅ SPRINT.md "Completed This Sprint" section reflects all finished items
+### Gate 4: Release Checklist (Sprint Close)
+[scrum-master] verifies:
+- ✅ All R4 findings resolved
+- ✅ All R5 tests passing + UAT PASS
+- ✅ No open blockers
+- ✅ SOLUTION_DESIGN.md updated (schema, endpoints, env vars)
+- ✅ DB migrations reviewed + rollback documented
+- ✅ New env vars added to `.env.example`
+- ✅ BACKLOG.md items set to `done`
+- ✅ SPRINT.md "Completed This Sprint" accurate
 - ✅ SPRINT_ARCHIVE.md updated
 
 ### Gate 5: Backlog Accuracy
-BACKLOG.md, BACKLOG_BOARD.md, and SPRINT.md must be 100% accurate at all times. [scrum-master] updates each on every status change.
+BACKLOG.md and SPRINT.md must be 100% accurate at all times.
 
 ### Gate 6: Sprint Readiness
 Before R1 of the first item:
-- ✅ All sprint items have passed Definition of Ready
-- ✅ Total sprint effort fits within the sprint duration
-- ✅ Any unresolved blockers from the previous sprint acknowledged
-- ✅ External dependencies (Supabase, Google Places key) confirmed available
+- ✅ All items passed Definition of Ready
+- ✅ Total effort fits sprint duration
+- ✅ External dependencies (Supabase, Google Places) confirmed
 - ✅ SPRINT.md "Active Items" populated
-
-### Gate 7: Sprint Retrospective
-After all items done and Gate 4 verified, write retrospective with Velocity, What Went Well, What to Improve, Action Items for Next Sprint. A sprint is NOT closed until the retrospective is written.
-
-### Gate 8: Multi-Environment Promotion
-INACTIVE until staging/UAT environments are provisioned. Once active: all tests pass in UAT, env vars verified, DB migrations applied, architect sign-off before UAT → PROD.
 
 ### Sprint Close Sequence
 
 ```
-1. Gate 4 — [scrum-master] verifies the release checklist
-2. Gate 7 — [scrum-master] writes the sprint retrospective
-3. RELEASE — [release-manager] executes release (version, notes, PR, tag, deploy, rollback docs)
-4. ARCHIVE — [scrum-master] archives completed items to SPRINT_ARCHIVE.md
+1. Gate 4 — [scrum-master] verifies release checklist
+2. RELEASE — [release-manager] executes release (version, notes, PR, tag, deploy)
+3. ARCHIVE — [scrum-master] archives to SPRINT_ARCHIVE.md
 ```
 
-### Definition of Done (MANDATORY)
+### Definition of Done
 
 1. ☐ Code complete — no TODOs
 2. ☐ [code-reviewer] — CRITICAL/HIGH fixed
 3. ☐ [security-reviewer] — CRITICAL/HIGH fixed
-4. ☐ [qa-reviewer] — CRITICAL/HIGH fixed
-5. ☐ [seo-reviewer] (if UI pages)
-6. ☐ [test-engineer] tests passing
-7. ☐ [tester] UAT PASS
-8. ☐ SPRINT.md updated
-9. ☐ BACKLOG.md item `done`
-10. ☐ BACKLOG_BOARD.md marked ✅
-11. ☐ [solution-architect] updated SOLUTION_DESIGN.md (R7)
-12. ☐ New API endpoints documented
-13. ☐ New env vars in `.env.example`
-14. ☐ Rollback plan for DB migrations / breaking API changes
-15. ☐ User manual updated (if user-facing)
+4. ☐ [test-engineer] automated tests passing (Full/Spike tiers)
+5. ☐ [tester] UAT PASS
+6. ☐ SPRINT.md updated
+7. ☐ BACKLOG.md item `done`
+8. ☐ SOLUTION_DESIGN.md updated (R2 architect, at close)
+9. ☐ New env vars in `.env.example`
+10. ☐ Rollback plan for DB migrations / breaking API changes
 
-**Fast Track (XS/S):** Items 1, 2, 3, 8, 9, 10 mandatory. Existing test suite must pass.
+**Fast Track (XS/S):** Items 1, 2, 3, 5, 6, 7 mandatory. Existing test suite must pass (no regressions).
 **Full (M/L) and Spike-First (XL):** All items.
 
-### Definition of Ready (before R3/R4)
+### Definition of Ready (before R3)
 
 1. ☐ User story written
 2. ☐ Acceptance criteria clear, testable
 3. ☐ Priority + effort + dependencies assigned
 4. ☐ Dependencies resolved
-5. ☐ [data-analyst] tracking plan
-6. ☐ [solution-architect] architecture review
-7. ☐ [marketing-manager] mini-plan (user-facing)
-8. ☐ BUSINESS_PLAN.md updated if item affects roadmap/pricing
-9. ☐ Performance AC defined (new API or pages)
+5. ☐ [solution-architect] architecture review (Full/Spike tiers)
+6. ☐ Performance AC defined (new API or pages)
 
-**Fast Track (XS/S):** Items 1-4 mandatory. Item 6 mandatory if item touches auth or adds new routes.
+**Fast Track (XS/S):** Items 1-4 mandatory. Item 5 mandatory if touching auth or new routes.
 
 ## Round-by-Round Execution Details
 
 ### Round 1: Definition
-- [product-manager]: Write user story + AC + priority + effort + dependencies
-- [data-analyst] (parallel): Event tracking plan, success metrics, KPIs
-- [marketing-manager] (parallel, optional): Marketing mini-plan
-- PM integrates tracking + marketing into the user story
+[product-manager]: user story + AC + priority + effort + dependencies.
 
 ### Round 2: Architecture
-- [solution-architect]: DB schema changes, API contract, security requirements, component structure
-- **R2 Query Performance Checklist:**
+[solution-architect]: DB schema changes, API contract, security requirements, component structure.
+**R2 Query Performance Checklist:**
+| # | Check |
+|---|-------|
+| Q-1 | All list queries bounded (`.limit()` or pagination) |
+| Q-2 | No N+1 sequential queries (joins or batching) |
+| Q-3 | Pagination on list endpoints (`page`/`limit`) |
+| Q-4 | Date-bounded analytics queries |
 
-| # | Check | What to verify |
-|---|-------|---------------|
-| Q-1 | All list queries bounded | Every query returning multiple rows must have `.limit()` OR pagination |
-| Q-2 | No N+1 sequential queries | Use joins or batch queries |
-| Q-3 | Pagination on list endpoints | Every list API route accepts `page`/`limit` |
-| Q-4 | Date-bounded analytics | Aggregation queries bounded by date range |
+### Round 3: Build
+- [backend-engineer]: API routes, migrations, schemas, types, auth guards.
+- [frontend-engineer]: Pages, components, hooks, forms, UX polish. Parallel with backend once API contracts are locked in R2; else sequence backend first.
+- Complete working code, no TODOs, error handling, all states (loading/error/empty/success).
 
-### Round 3: Build (Backend + AI/ML)
-- [backend-engineer]: API routes, migrations, schemas, types, auth guards
-- [ai-ml-engineer]: AI agents, pipelines, orchestration, validation, prompts (v1: typically inactive)
-- Complete working code, no TODOs, error handling, audit logging
+### Round 4: Review (Parallel)
+- [code-reviewer]: Architecture, patterns, performance, DRY, TypeScript strictness, error handling, React patterns, accessibility. N+1 = CRITICAL.
+- [security-reviewer]: Auth, data isolation, vulnerabilities — CRITICAL/HIGH/MEDIUM/LOW.
+- Reviewers report findings only. Engineers fix CRITICAL + HIGH before R5.
 
-### Round 4: Build (Frontend)
-- [frontend-engineer]: Pages, components, hooks, forms, UX polish
-- Depends on R3 API contracts
-- Handle all states: loading, error, empty, success
-
-### Round 5: Review (4 Reviewers in Parallel)
-- [seo-reviewer]: Public pages — technical + content SEO
-- [code-reviewer]: Architecture, patterns, performance, DRY — N+1 = CRITICAL
-- [security-reviewer]: Auth, data isolation, vulnerabilities — CRITICAL/HIGH/MEDIUM/LOW
-- [qa-reviewer]: TypeScript strictness, error handling, React patterns, accessibility
-- All report findings with file/line refs — none write code
-- Engineers fix CRITICAL + HIGH before R6
-
-### Round 6: Testing (Sequential)
-- [test-engineer]: e2e, integration, unit tests — happy path, edge cases, data isolation, auth
-- [tester] UAT: PASS/FAIL/WARN/SKIP per test case
-- All tests pass before marking done
-
-### Round 7: Close
-- [solution-architect]: Update SOLUTION_DESIGN.md with what was actually built
-- Document deviations, new API endpoints, new tables, new env vars, rollback plans
-
-### Round 8: Post-Close (Optional)
-- [marketing-manager]: Update MARKETING_PLAN.md for user-facing features
-- [technical-writer]: Update user manual, CHANGELOG.md
-- Both run in PARALLEL
+### Round 5: Testing (Sequential)
+- [test-engineer]: e2e, integration, unit tests — happy path, edge cases, data isolation, auth.
+- [tester] UAT: PASS/FAIL/WARN/SKIP per test case.
+- All tests pass before marking done.
 
 ## Key Documents (Sources of Truth)
 
@@ -324,174 +230,158 @@ INACTIVE until staging/UAT environments are provisioned. Once active: all tests 
 | SPRINT.md | [scrum-master] | Living sprint board — active items only |
 | SPRINT_ARCHIVE.md | [scrum-master] | Historical completed items |
 | BACKLOG.md | [product-manager] | All user stories, priorities, sprint assignments |
-| BACKLOG_BOARD.md | [product-manager] | Progress dashboard |
-| PRD.md | [product-manager] | Product requirements, personas, features, KPIs |
+| PRD.md | [product-manager] | Product requirements, personas, features |
 | SOLUTION_DESIGN.md | [solution-architect] | DB schema, API design, security model |
-| BUSINESS_PLAN.md | [product-manager] | Revenue projections, go-to-market, positioning |
-| MARKETING_PLAN.md | [marketing-manager] | Campaign calendar, channels, messaging, budget |
-| STRATEGIC_PLAN.md | [marketing-manager] | Market analysis, competitive positioning |
-| docs/user-manual/ | [technical-writer] | How-to guides for all features |
 | RELEASES.md | [release-manager] | Local reference copy of release notes |
 
 ## Non-Negotiable Rules
 
 ### Security (data isolation model)
 
-TravelPlanner is multi-tenant at the **trip** level, not just the user level. Every trip has members (`trip_members` table) with roles: `owner`, `editor`, `viewer`.
+TravelPlanner is multi-tenant at the **trip** level. Every trip has members (`trip_members`) with roles: `owner`, `editor`, `viewer`.
 
-- Authentication: Supabase Auth (email/password v1; OAuth in a later sprint)
-- Authorization: RLS on every table; trip-scoped resources (itinerary items, bookmarks, expenses, accommodations, transportation) are accessible only to current `trip_members` with a non-revoked role
-- Writes restricted by role: `viewer` cannot write; `editor` can CRUD trip content; `owner` additionally manages members and can delete the trip
-- Application-level auth checks in every API route (defense-in-depth)
-- Never trust client-provided `trip_id` — always verify membership server-side
-- Invitation tokens: single-use, expiring, not guessable (crypto-random)
-- Google Places API key: server-side only, never exposed to the client
+- Authentication: Supabase Auth (email/password v1; OAuth later).
+- Authorization: RLS on every table; trip-scoped resources accessible only to current `trip_members`.
+- Writes restricted by role: `viewer` cannot write; `editor` can CRUD trip content; `owner` manages members and can delete the trip.
+- Application-level auth checks in every API route (defense-in-depth).
+- Never trust client-provided `trip_id` — always verify membership server-side.
+- Invitation tokens: single-use, expiring, crypto-random.
+- Google Places API key: server-side only.
 
 ### Privacy & Compliance
-- GDPR: users can export and delete their data
-- No PII in logs or error messages
-- Parameterized queries only
-- Google Places data cached per attribution rules (TTL + display attribution where required)
+- Users can export and delete their data.
+- No PII in logs or error messages.
+- Parameterized queries only.
+- Google Places data cached per attribution rules (TTL + attribution where required).
 
 ### Code Quality
-- TypeScript strict mode — no `any`, no unsafe `as` casts, no non-null assertions without validation
-- No TODOs in committed code
-- Audit logging for all mutations
-- Rate limiting on auth, invitations, and Google Places proxy endpoints
-- Error handling in try/catch; appropriate status codes
+- TypeScript strict mode — no `any`, no unsafe `as` casts, no non-null assertions without validation.
+- No TODOs in committed code.
+- Audit logging for all mutations.
+- Rate limiting on auth, invitations, and Google Places proxy endpoints.
+- Error handling in try/catch; appropriate status codes.
 
 ### Frontend Standards
-- Skeleton loaders for content areas (not spinners)
-- Empty states: icon + message + prominent CTA
-- Confirmation dialogs for destructive actions (delete trip, remove member, etc.)
-- Mobile-first responsive design — trip-planning is often done on mobile while travelling
-- v1 English only; date formatting via `Intl.DateTimeFormat`; currency configurable per trip (ISO 4217 codes)
+- Skeleton loaders for content areas (not spinners).
+- Empty states: icon + message + prominent CTA.
+- Confirmation dialogs for destructive actions.
+- Mobile-first responsive design.
+- v1 English only; date formatting via `Intl.DateTimeFormat`; currency configurable per trip (ISO 4217).
 
 ### Performance Standards
-- API response time: < 500ms P95 for standard CRUD
-- Page LCP: < 2.5s on mobile
-- DB queries: no single query > 200ms under normal load
-- N+1 queries: CRITICAL finding
-- Missing pagination on list endpoints: HIGH finding
-- Google Places proxy: cache hits must be < 50ms; API calls rate-limited
+- API response time: < 500ms P95 for standard CRUD.
+- Page LCP: < 2.5s on mobile.
+- DB queries: no single query > 200ms under normal load.
+- N+1 queries: CRITICAL finding.
+- Missing pagination on list endpoints: HIGH finding.
+- Google Places proxy: cache hits < 50ms; API calls rate-limited.
 
 ### Testing Standards
-- Deterministic tests
-- Page Object Model for e2e
-- Test data factories
-- Regression tests for every confirmed bug — test-first
-- Full suite runs after every new test
+- Deterministic tests.
+- Page Object Model for e2e.
+- Test data factories.
+- Regression tests for every confirmed bug — test-first.
+- Full suite runs after every new test.
 
 ### Shared File Governance
-- Files in `app/src/lib/types/`, `app/src/lib/validations/`, `app/src/lib/supabase/` are shared
-- Cross-boundary edits flagged by [code-reviewer] in R5
-- [scrum-master] sequences parallel agents that touch shared files
+Files in `app/src/lib/types/`, `app/src/lib/validations/`, `app/src/lib/supabase/` are shared. Cross-boundary edits flagged by [code-reviewer] in R4. [scrum-master] sequences parallel agents that touch shared files.
 
 ### Rollback & Incident Management
-- Every DB migration ships with a documented rollback
-- Every breaking API change documents versioning/rollback
-- **SEV1** — Data loss / outage: halt all sprint work
-- **SEV2** — Major feature broken: fix before resuming sprint work
-- **SEV3** — Minor: log and schedule for next sprint
-- After SEV1/SEV2: [solution-architect] writes post-mortem in SOLUTION_DESIGN.md
+- Every DB migration ships with a documented rollback.
+- Every breaking API change documents versioning/rollback.
+- **SEV1** — Data loss/outage: halt sprint work.
+- **SEV2** — Major feature broken: fix before resuming.
+- **SEV3** — Minor: log and schedule.
+- After SEV1/SEV2: [solution-architect] writes post-mortem in SOLUTION_DESIGN.md.
 
 ## Sprint Item Status Flow
 
 **Full / Spike-First (M/L/XL):**
 ```
-requirements → architecture → backend → ai-ml → frontend →
-seo-review → code-review → security-review → qa-review →
-test-engineer → tester → done
+requirements → architecture → backend → frontend →
+code-review → security-review → test-engineer → tester → done
 ```
 
 **Fast Track (XS/S):**
 ```
-requirements → backend/frontend → code-review → security-review → done
+requirements → backend/frontend → code-review → security-review → tester-smoke → done
 ```
 
 Format per active item in SPRINT.md:
 ```markdown
 ### [B-XXX] Feature Name
 - **Tier**: [Fast Track / Full / Spike-First]
-- **Status**: [current step] (✅ for completed steps)
+- **Status**: [current step]
 - **Assigned To**: [active agent(s)]
-- **Blockers**: [any blockers, who resolves]
-- **Feature Context**: [2-3 bullet summary]
-- **Handoff Notes**: [context from last agent for next agent]
+- **Blockers**: [any, owner]
+- **Feature Context**: [2-3 bullets]
+- **Handoff Notes**: [context for next agent]
 - **Files Changed**: [accumulated list]
 - **Parallel Opportunity**: [which agents can run simultaneously]
 ```
 
 ## Session Start Protocol
 
-At session start:
-1. [scrum-master] reads SPRINT.md and BACKLOG.md
-2. Identifies current sprint items and pipeline stage
-3. Determines which agent(s) run next
-4. Launches agents — parallel when possible
-5. Updates SPRINT.md after each round
+1. [scrum-master] reads SPRINT.md and BACKLOG.md.
+2. Identifies current sprint items and pipeline stage.
+3. Determines which agent(s) run next.
+4. Launches agents — parallel when possible.
+5. Updates SPRINT.md after each round.
 
 ## Pipeline Continuation Protocol
 
-**CRITICAL**: After ANY agent completes, check SPRINT.md and continue to the next round. Do NOT stop after build rounds and wait for the user.
+**CRITICAL**: After ANY agent completes, check SPRINT.md and continue to the next round. Do NOT stop after build rounds and wait for the user (unless there's an external blocker).
 
 **Full / Spike-First continuation:**
-- After R3/R4 → IMMEDIATELY launch R5 reviewers (4 in parallel)
-- After R5 findings fixed → IMMEDIATELY launch R6 [test-engineer]
+- After R3 build → IMMEDIATELY launch R4 reviewers in parallel
+- After R4 findings fixed → IMMEDIATELY launch R5 [test-engineer]
 - After [test-engineer] → IMMEDIATELY launch [tester] UAT
-- After UAT passes → IMMEDIATELY launch R7 [solution-architect] close
-- After R7 → R8 if applicable
+- After UAT PASS → update SOLUTION_DESIGN.md and mark item done
 
-**Fast Track continuation:**
-- After R3/R4 → IMMEDIATELY launch [code-reviewer] + [security-reviewer] in parallel
-- After R5 fixed → run existing test suite → zero regressions → done
+**Fast Track:**
+- After R3 → IMMEDIATELY launch [code-reviewer] + [security-reviewer]
+- After fixes → existing test suite → zero regressions → tester smoke → done
 
-**Sprint close continuation:**
-- All items done → Gate 4 → Gate 7 → [release-manager] → archive
+**Sprint close:**
+- All items done → Gate 4 → [release-manager] → archive
 
-**Context discipline:** Summarize — not quote — prior round output for next agents. SPRINT.md is the context contract.
+**Context discipline:** Summarize — don't quote — prior round output. SPRINT.md is the context contract.
 
 ### Cross-Item Parallelization Rules
 
-| # | Rule | Limit |
-|---|------|-------|
-| P-1 | Max one L/XL item active at a time | L/XL generate 7+ rounds |
-| P-2 | S/XS items can run alongside any active item | Fast Track footprint is minimal |
-| P-3 | Max two M items in parallel | Three risks context pressure |
-| P-4 | Interleave, don't overlap full pipelines | Complete R1-R5 of first before R1 of second |
+| # | Rule |
+|---|------|
+| P-1 | Max one L/XL item active at a time |
+| P-2 | S/XS items can run alongside any active item |
+| P-3 | Max two M items in parallel |
+| P-4 | Interleave, don't overlap full pipelines |
 
-## R5 Findings Persistence
+## R4 Findings Persistence
 
-After R5 reviewers complete, save deduplicated findings to `SPRINT_FINDINGS.md`:
+After R4 reviewers complete, findings are tracked inline in SPRINT.md under the item's Handoff Notes (no separate file — personal project). Format:
 
 ```markdown
-# Sprint N — R5 Findings (Deduplicated)
-## CRITICAL (must fix before R6)
-## HIGH (must fix before R6)
-| # | File | Finding | Fix |
-|---|------|---------|-----|
-## MEDIUM (fix if time permits)
-## LOW (defer to future sprint)
+**R4 Findings:**
+- CRITICAL: [file:line] description → fix owner
+- HIGH: [file:line] description → fix owner
+- MEDIUM/LOW: deferred
 ```
 
 ## Pre-Existing Code Review Gate
 
-Any code in the repo that has NOT been through R5 MUST be flagged as "unreviewed" in SPRINT.md.
+Any code in the repo not through R4 must be flagged as "unreviewed" in SPRINT.md.
 
 ## Scope Change Control
 
 Items may NOT be silently added to or removed from an active sprint.
-- **Adding:** assess impact → identify what gets deprioritized → update SPRINT.md with rationale
-- **Removing:** return to BACKLOG.md with status `backlog` and deferral reason
+- **Adding:** assess impact → identify what gets deprioritized → update SPRINT.md.
+- **Removing:** return to BACKLOG.md with status `backlog` and deferral reason.
 
 ## Blocker Escalation Protocol
 
-Every blocker in SPRINT.md must include:
-- **Description**: What is blocked and why
-- **Owner**: Which agent or external party resolves
-- **Target resolution**: When
+Every blocker in SPRINT.md must include Description, Owner, Target resolution.
 
-If unresolved when the responsible agent's round completes, present the user three options:
+If unresolved when the responsible agent's round completes, present three options:
 1. **Resolve**: Provide the information
-2. **Defer**: Move to next sprint with blocker documented
-3. **Workaround**: Propose an alternative approach
+2. **Defer**: Move to next sprint
+3. **Workaround**: Propose an alternative
