@@ -10,7 +10,22 @@ export type AuditAction =
   | 'password_reset_complete'
   | 'create'
   | 'update'
-  | 'delete';
+  | 'delete'
+  | 'invitation_created'
+  | 'invitation_accepted'
+  | 'invitation_revoked'
+  | 'places_searched'
+  | 'places_search_cache_hit'
+  | 'places_rate_limited'
+  | 'place_details_fetched'
+  | 'place_photo_proxied'
+  | 'signup_completed'
+  | 'signup_rejected'
+  | 'signup_compensation_failed'
+  | 'signup_orphan_unflagged'
+  | 'bookmark_created'
+  | 'bookmark_updated'
+  | 'bookmark_deleted';
 
 export interface AuditParams {
   actorId: string | null;

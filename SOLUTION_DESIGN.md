@@ -841,6 +841,579 @@ drop function if exists public.tg_seed_owner_member();
 
 *(post-mortems for SEV1/SEV2 incidents, authored by [solution-architect])*
 
+## Sprint 2 — R2 Architecture Additions
+
+### B-012 — Trip member invite & accept
+
+**Migration `0003_invitations.sql`** (additive — `trip_invitations` already exists from 0001):
+- ADD `revoked_at timestamptz` column.
+- ADD partial index `trip_invitations_expires_idx` on `(expires_at) WHERE accepted_at IS NULL AND revoked_at IS NULL`.
+- ADD partial unique index `trip_invitations_active_uniq` on `(trip_id, lower(email)) WHERE accepted_at IS NULL AND revoked_at IS NULL`.
+- ADD `get_invitation_by_token(p_token text)` SECURITY DEFINER function — uniform `{status, trip_name?, inviter_name?, email?, role?, expires_at?}` for `pending|expired|used|revoked|invalid`. Anti-enumeration.
+- ADD `accept_invitation(p_token text)` SECURITY DEFINER function — atomic FOR UPDATE lock + idempotent `trip_members` upsert + mark used. Raises `token_invalid|token_expired|token_used|token_revoked|unauthenticated`.
+- Token expiry: 48h. Token gen: `crypto.randomBytes(32).toString('base64url')` server-side.
+- Rollback: drop both functions, drop both new indexes, drop revoked_at.
+
+**API contracts:**
+
+| Method | Path | Auth | Rate limit | Notes |
+|--------|------|------|------------|-------|
+| POST | `/api/trips/[tripId]/invitations` | owner | 10/owner/hr | body `{email, role}`; 201 returns `{invitation: {…, invite_url}}`; 409 `invitation_pending_exists` |
+| GET | `/api/trips/[tripId]/invitations` | owner | — | paginated `page`/`limit` (default 20, max 100); token NOT included |
+| GET | `/api/invitations/[token]` | public | 30/IP/hr | always 200 with `{status, …}`; never leaks |
+| POST | `/api/invitations/[token]/accept` | session | 30/user/hr | calls `accept_invitation` RPC; failure: invalid→404, expired→410, used→409, revoked→410, unauth→401 |
+
+**Audit log verbs:** `invitation_created`, `invitation_accepted`, `invitation_revoked`. Email hashed (sha256, first 16 hex chars).
+
+**Frontend:**
+- `app/src/app/trips/[id]/members/page.tsx` — Members tab.
+- `app/src/app/invite/[token]/page.tsx` — server component fetches lookup; renders `InviteAcceptCard` (signed-in) / `SignInPrompt` (signed-out, `next=/invite/[token]`) / `InviteErrorState`.
+- Components: `InvitationForm`, `PendingInvitationsList`, `InviteAcceptCard`, `InviteErrorState`.
+
+---
+
+### B-009 — Google Places search proxy
+
+**Migration `0004_places.sql`** (new table):
+```sql
+create table public.places (
+  id uuid PK default gen_random_uuid(),
+  google_place_id text UNIQUE NOT NULL,
+  name text NOT NULL,
+  formatted_address text,
+  lat numeric(9,6), lng numeric(9,6),
+  category text NOT NULL CHECK (category IN (...)),
+  cached_details jsonb DEFAULT '{}',
+  cached_at timestamptz,
+  created_at, updated_at
+);
+```
+RLS: SELECT for authenticated; service-role only writes. Trigger `tg_set_updated_at`. Index `places_category_idx`.
+
+**Internal `PlaceCategory` enum** (canonical, reused by B-009/B-010/B-011):
+`restaurant | cafe | bar | sight | museum | shopping | hotel | transport_hub | park | other`
+
+**Mapping** in `app/src/lib/google/categories.ts` as pure fn `mapGoogleTypesToCategory(types) → PlaceCategory`. First-match priority order: restaurant → cafe → bar → museum → sight → shopping → hotel → transport_hub → park → other.
+
+**B-011 prerequisite:** widen `bookmarks.category` CHECK to match — flagged for B-011 R2.
+
+**API — `GET /api/places/search?q=`:**
+- Auth: `requireAuth()` (401 anon).
+- Validation Zod: q ∈ [2,100] chars; control chars stripped.
+- Cache semantics: search results NEVER served from local cache (Google ToS). Side-effect upsert into `places` (slim fields only — `cached_details` reserved for B-010).
+- 200: `{ results: [{google_place_id, name, formatted_address, lat, lng, category}] }` — max 20.
+- Errors: 400 `invalid_query`, 401 `unauthorized`, 429 `rate_limit_exceeded` + `Retry-After` header, 502 `places_unavailable`, 500 `server_error`.
+- Rate limit: 30/user/min, key `places:search:user:${uid}`.
+- Audit: `places_searched` (logs `query_length` + `result_count` only).
+
+**Google client wrapper** — `app/src/lib/google/places.ts`: `import 'server-only'`, exports `searchPlaces` + `getPlaceDetails` interface stub (B-010 implements). Endpoint Google Places v1 textSearch with FieldMask. Timeout 5s, retry once on 5xx.
+
+**Performance:** P95 < 800ms cache-miss path.
+
+---
+
+### B-019 — Invitation-only sign-up (remove public sign-up)
+
+**Goal:** Account creation requires a valid, unconsumed invitation token whose `email` matches the submitted email. Public `/sign-up` is removed; the only entry point is `/invite/[token]`.
+
+**Decision 1 — RPC choice (atomicity):** Add a NEW RPC `signup_consume_invitation(p_token text, p_email text, p_user_id uuid)` in additive migration **`0006_signup_invitation.sql`**. The existing `accept_invitation()` RPC depends on `auth.uid()`, but at sign-up time the freshly created auth user has not yet authenticated (no JWT in the request), so a session-driven RPC cannot be used atomically. The new RPC is `SECURITY DEFINER`, takes the new user's id explicitly, and performs token validation + email match + member insert + invitation consumption inside a single transaction with `FOR UPDATE` lock. Justification: choice (a) — materially better atomicity than option (b)'s "validate at route, then call accept_invitation post sign-in" because option (b) requires an extra round-trip and a second auth step before consuming the invitation, opening a window where the user exists but the invitation is uncommitted.
+
+```
+signup_consume_invitation(p_token, p_email, p_user_id)
+  → returns table(trip_id uuid, role text)
+  → raises: 'token_invalid' | 'token_expired' | 'token_used' | 'token_revoked'
+            | 'email_mismatch'   (lower(invitation.email) != lower(p_email))
+            | 'arg_invalid'      (null/empty inputs)
+```
+
+`accept_invitation` is retained unchanged for the existing B-012 `/api/invitations/[token]/accept` flow (used when an already-signed-in user redeems an invitation for an additional trip).
+
+**Decision 2 — Rollback ordering for `POST /api/auth/signup`:**
+
+```
+1. Rate-limit check (10/IP/15min — tightened from 5).
+2. Zod validate body { invite_token, email, password, confirm_password }.
+3. Pre-flight token lookup via get_invitation_by_token(p_token) → must be 'pending';
+   verify lower(invitation.email) === lower(submitted email).
+   ↳ on failure: 403 with appropriate error code; NO user created.
+4. Admin createUser via service-role client (email_confirm: true to allow trip access immediately;
+   per AC #5 the server controls confirmation since gating is now the invitation itself).
+   ↳ on duplicate email: 200 {ok:true} (anti-enumeration uniform shape).
+   ↳ on other error: 500 {server_error}.
+5. Call signup_consume_invitation(token, email, new_user_id) via service-role client.
+   ↳ on success: audit signup_completed; return 200 {ok:true}.
+   ↳ on failure: COMPENSATION — delete the just-created auth user via
+       supabase.auth.admin.deleteUser(new_user_id); audit signup_rejected with rpc_error code;
+       return 403 with mapped code.
+```
+
+**Mid-flight failure handling:** If `signup_consume_invitation` raises `token_used` because a concurrent acceptance won the `FOR UPDATE` race, the compensation deletes the orphan auth user. If `auth.admin.deleteUser` itself fails (extremely rare), log a SEV3 audit entry `signup_compensation_failed` with `{user_id}` for manual cleanup; still return 403 to the client. This is acceptable because (a) the orphan user has no `profiles` row (created on first sign-in, not on auth.users insert), (b) no `trip_members` row was created (RPC failed before insert), (c) the orphan email is permanently locked from re-registration only until manual cleanup — a personal-project tolerable risk.
+
+**Decision 3 — Email match enforcement:** Performed BOTH at the route layer (defense-in-depth, before admin createUser to avoid creating a doomed user) AND inside `signup_consume_invitation` (atomic guard against TOCTOU). This is choice (a) plus belt-and-braces.
+
+**Schema validation — `app/src/lib/validations/auth.ts`:**
+
+```ts
+export const SignupInput = z
+  .object({
+    email: z.string().email().max(254),
+    password: PasswordComplexity,
+    confirm_password: z.string(),
+    invite_token: z
+      .string()
+      .min(16)                          // 32-byte base64url ≥ 43 chars; 16 is a defensive floor
+      .max(256)
+      .regex(/^[A-Za-z0-9_-]+$/, 'Invalid token format'),
+  })
+  .refine((d) => d.password === d.confirm_password, {
+    message: 'Passwords do not match',
+    path: ['confirm_password'],
+  });
+```
+
+**API contract — `POST /api/auth/signup`:**
+
+Request:
+```json
+{ "email": "...", "password": "...", "confirm_password": "...", "invite_token": "..." }
+```
+
+Responses (uniform envelope `{ error: { code, message, details } }`):
+
+| Status | Code | When |
+|--------|------|------|
+| 200 | — `{ok:true}` | Success OR duplicate email (anti-enumeration). |
+| 400 | `validation_error` | Zod failure (missing/malformed fields). |
+| 403 | `invite_required` | `invite_token` absent or fails regex (caught at validation; mapped before generic validation_error if token field is the only failure). |
+| 403 | `invite_invalid` | Token not found. |
+| 403 | `invite_expired` | `expires_at` past. |
+| 403 | `invite_used` | `accepted_at` already set. |
+| 403 | `invite_revoked` | `revoked_at` set. |
+| 403 | `invite_email_mismatch` | Submitted email ≠ invitation email (case-insensitive). |
+| 429 | `rate_limit_exceeded` | 10/IP/15min exceeded. |
+| 500 | `server_error` | Unexpected. |
+
+(Note: `email_already_registered` is intentionally NOT a distinct response — duplicate-email returns 200 to preserve anti-enumeration, matching the Sprint 1 contract.)
+
+**ApiErrorCode additions** (`app/src/lib/api/response.ts`): add `'invite_required' | 'invite_invalid' | 'invite_expired' | 'invite_used' | 'invite_revoked' | 'invite_email_mismatch'`.
+
+**Audit actions:** Extend `AuditAction` union in `app/src/lib/audit.ts` with:
+- `signup_completed` — successful invite-gated sign-up (`metadata: { trip_id, role }`).
+- `signup_rejected` — any 4xx outcome (`metadata: { reason: 'invite_required'|'invite_invalid'|... }`, no email/token).
+- `signup_compensation_failed` — orphan auth user deletion failed (SEV3, manual cleanup).
+
+The existing `signup` action is retained but only emitted on the legacy code path (none after this ships); new path emits `signup_completed`/`signup_rejected`.
+
+**Files plan (R3):**
+
+Backend (`[backend-engineer]`):
+- `app/supabase/migrations/0006_signup_invitation.sql` (NEW) + `0006_signup_invitation_rollback.sql`.
+- `app/src/lib/validations/auth.ts` — extend `SignupInput`. **SHARED FILE** — flag for code-reviewer; no overlap with frontend in same sprint.
+- `app/src/lib/api/response.ts` — extend `ApiErrorCode`. **SHARED FILE** — flag.
+- `app/src/lib/audit.ts` — extend `AuditAction`. **SHARED FILE** — flag.
+- `app/src/app/api/auth/signup/route.ts` — full rewrite per rollback flow above; switch to service-role admin createUser; remove `supabase.auth.signUp` (which assumes public sign-up).
+- `app/src/lib/supabase/service.ts` — confirm `auth.admin` access available; no edits expected.
+
+Frontend (`[frontend-engineer]`):
+- `app/src/app/sign-up/page.tsx` — DELETE (or replace with redirect to `/sign-in?notice=invite_only`).
+- `app/src/app/sign-in/page.tsx` — show notice banner when `?notice=invite_only`.
+- `app/src/app/invite/[token]/page.tsx` — extend to render a `SignupForInviteForm` when `status=pending` AND viewer is signed-out (currently shows `SignInPrompt`); reuse existing `InviteErrorState`.
+- `app/src/components/auth/SignupForInviteForm.tsx` (NEW) — read-only email field (pre-filled from server lookup), password fields, hidden token, posts to `/api/auth/signup`.
+- Remove any nav links to `/sign-up`.
+
+Shared-file overlaps: `auth.ts`, `response.ts`, `audit.ts` — all backend-owned. No parallel frontend touch this sprint. `[scrum-master]` to sequence: backend lands shared-file edits first, frontend then consumes new types.
+
+**Performance AC:** `POST /api/auth/signup` happy path < 800ms P95 (admin createUser dominant). Rate-limit window 10/IP/15min. Pre-flight token lookup is a single indexed query (token PK).
+
+**Bootstrap admin policy:**
+
+TravelPlanner is an invitation-only personal platform. Public sign-up is permanently disabled because the product is intended for the platform owner and explicitly invited trip partners only. The first user account ("bootstrap admin") was created during Sprint 1 while public sign-up was open; AC #9 of B-019 preserves all such pre-existing accounts unchanged. No application route can create an account without consuming a valid invitation, and only an existing trip owner can mint invitations (B-012). This produces a closed graph rooted at the bootstrap admin.
+
+To add a NEW account outside the invitation flow (e.g., a second admin in the rare case the bootstrap account is lost or for ops migration), the only supported mechanism is **DB-level**: connect to Supabase via the service role and either (a) call `auth.admin.createUser({ email, password, email_confirm: true })` from a one-off script, or (b) insert directly into `auth.users` via a Supabase support migration. Such accounts will have no trip memberships until an invitation is accepted or a `trip_members` row is inserted manually. This bypass is intentionally undocumented in any user-facing surface and gated by service-role credentials held only by the platform owner. No environment variable, feature flag, or admin UI exposes this path.
+
+**Migration rollback (`0006_signup_invitation_rollback.sql`):**
+```sql
+begin;
+drop function if exists public.signup_consume_invitation(text, text, uuid);
+commit;
+```
+The route layer rollback is a code revert: restore the Sprint 1 `signup/route.ts` and remove the new error codes. Pre-existing accounts are unaffected.
+
+**Open questions resolved:**
+1. Rollback ordering — confirmed: validate token (pre-flight) → admin-create user → consume RPC → on RPC failure delete auth user. Compensation failure logged SEV3.
+2. RPC signature — NEW RPC `signup_consume_invitation(token, email, user_id)` with email match enforced atomically; `accept_invitation` retained for B-012 in-app flow.
+3. Bootstrap admin policy — documented above.
+
+---
+
+### B-010 — Place detail cache & page
+
+**No migration.** Reuses `places` table from `0004_places.sql` (B-009). The `cached_details jsonb` and `cached_at timestamptz` columns are already provisioned and reserved for B-010. RLS is unchanged: authenticated SELECT on `places`; writes via service-role only.
+
+**Endpoints:**
+
+| Method | Path | Auth | Rate limit | Notes |
+|--------|------|------|------------|-------|
+| GET | `/api/places/[googlePlaceId]` | session | 30/user/min | Cache-first; on miss → Google v1 `places.get` + UPSERT `cached_details` + `cached_at`. |
+| GET | `/api/places/[googlePlaceId]/photo/[photoRef]?maxWidth=N` | session | 60/user/min | Streaming binary proxy to Google Places photo media; `Cache-Control: public, max-age=604800, immutable`. |
+
+Cache TTL = 7 days (mirrors B-009 search cache window). Reused constant `CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000`.
+
+**Detail response JSON (success 200):**
+```ts
+// app/src/lib/types/domain.ts — NEW exports
+export interface PhotoRef {
+  photo_reference: string;     // Google v1 photo "name" tail (after places/{id}/photos/)
+  width: number;
+  height: number;
+  attributions: string[];      // HTML strings — render via dangerouslySetInnerHTML in attribution block ONLY
+}
+
+export interface DayHours {
+  day: 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0 = Sunday (Google convention)
+  open: string | null;             // "HH:MM" 24h, null if closed all day
+  close: string | null;            // "HH:MM" 24h, null if open 24h
+}
+
+export interface WeeklyHours {
+  periods: DayHours[];             // up to 7 entries; missing day = closed
+  weekday_text: string[];          // Google-localized human strings (en); display-only
+  open_now?: boolean;              // not stored — computed at read time if available
+}
+
+export interface PlaceDetail {
+  google_place_id: string;
+  name: string;
+  formatted_address: string | null;
+  lat: number | null;
+  lng: number | null;
+  category: PlaceCategory;
+  rating: number | null;           // 0..5, one decimal
+  user_ratings_total: number | null;
+  phone: string | null;            // internationalPhoneNumber preferred
+  website: string | null;          // canonical website URI
+  opening_hours: WeeklyHours | null;
+  photos: PhotoRef[];              // capped at 10
+  google_maps_url: string | null;  // googleMapsUri
+  source: 'cache' | 'google';
+  cached_at: string | null;        // ISO 8601
+}
+```
+
+`PlaceDetail` is added to `app/src/lib/types/domain.ts` alongside `Place`. Re-exported from `lib/google/places.ts`.
+
+**Google FieldMask** (v1 `GET https://places.googleapis.com/v1/places/{id}`):
+```
+id,displayName,formattedAddress,location,types,rating,userRatingCount,
+internationalPhoneNumber,websiteUri,googleMapsUri,regularOpeningHours,
+photos.name,photos.widthPx,photos.heightPx,photos.authorAttributions
+```
+Quota cost note: this mask spans Basic + Contact + Atmosphere SKUs (rating + phone + opening hours). Per-call cost is materially higher than search; the 7-day cache + per-user 30/min rate limit + cache-first read are designed to keep amortized cost low. Photo media calls are billed separately under the Photo SKU; the photo proxy keeps `maxWidth` strictly bounded to four allowed values to prevent quota waste.
+
+**`cached_details` JSONB shape (zod schema, validated on read AND before UPSERT):**
+
+```ts
+// app/src/lib/validations/places.ts — additions
+export const PhotoRefSchema = z.object({
+  photo_reference: z.string().min(1).max(512),
+  width: z.number().int().positive().max(20000),
+  height: z.number().int().positive().max(20000),
+  attributions: z.array(z.string().max(2048)).max(8),
+});
+
+export const DayHoursSchema = z.object({
+  day: z.number().int().min(0).max(6),
+  open: z.string().regex(/^[0-2]\d:[0-5]\d$/).nullable(),
+  close: z.string().regex(/^[0-2]\d:[0-5]\d$/).nullable(),
+});
+
+export const WeeklyHoursSchema = z.object({
+  periods: z.array(DayHoursSchema).max(7),
+  weekday_text: z.array(z.string().max(200)).max(7),
+});
+
+// Loose at the top level (so upstream Google additions don't break reads)
+// but strict on every displayed field.
+export const PlaceDetailCachedSchema = z.object({
+  rating: z.number().min(0).max(5).nullable(),
+  user_ratings_total: z.number().int().min(0).nullable(),
+  phone: z.string().max(64).nullable(),
+  website: z.string().url().max(2048).nullable(),
+  opening_hours: WeeklyHoursSchema.nullable(),
+  photos: z.array(PhotoRefSchema).max(10),
+  google_maps_url: z.string().url().max(2048).nullable(),
+}).passthrough();   // tolerate extra Google fields
+```
+
+Slim columns (`name`, `formatted_address`, `lat`, `lng`, `category`) remain authoritative on the row; only the enriched fields live in `cached_details`. Detail UPSERT updates both: slim columns refreshed (in case Google moved the place) AND `cached_details` replaced AND `cached_at = now()`.
+
+**Path validation:**
+```ts
+export const GooglePlaceIdParam = z.string().min(8).max(255).regex(/^[A-Za-z0-9_-]+$/);
+export const PhotoRefParam = z.string().min(8).max(512).regex(/^[A-Za-z0-9_\-/.]+$/);
+export const PhotoMaxWidth = z.union([z.literal(200), z.literal(400), z.literal(800), z.literal(1200)]);
+```
+Anything else → 400 `invalid_place_id` (or `validation_error` for the photo route).
+
+**Photo proxy contract — `GET /api/places/[googlePlaceId]/photo/[photoRef]?maxWidth=N`:**
+- Auth: `requireAuth()` (401 anon).
+- Validate `googlePlaceId`, `photoRef`, `maxWidth` (must be one of 200|400|800|1200; else 400).
+- Verify the photoRef belongs to the place: SELECT `cached_details->'photos'` and check that `photo_reference` matches one entry. If `cached_details` empty, fetch detail first (single Google call) then verify. Mismatch → 404 `not_found`. This prevents using the proxy as an open Google photo proxy with arbitrary refs.
+- Call Google v1: `GET https://places.googleapis.com/v1/{photoRef}/media?maxWidthPx={N}&key={KEY}` with `skipHttpRedirect=false` (default; Google returns the binary directly when key is in query, OR a 302 to the CDN URL). Use `fetch` with `redirect: 'follow'`. Server-side only — API key never reaches client.
+- Stream the response body back: `new NextResponse(googleRes.body, { status: 200, headers: { 'Content-Type': googleRes.headers.get('content-type') ?? 'image/jpeg', 'Cache-Control': 'public, max-age=604800, immutable', 'X-Content-Type-Options': 'nosniff' } })`.
+- Errors: 502 `places_unavailable` if Google non-2xx; 429 with `Retry-After`; 5s timeout.
+- Audit: `place_photo_proxied` with `{ google_place_id, max_width }` (no photoRef in metadata — too long, not useful).
+
+**Detail endpoint flow — `GET /api/places/[googlePlaceId]`:**
+1. `requireAuth()` (401 anon).
+2. Validate `googlePlaceId` via `GooglePlaceIdParam` → 400 `invalid_place_id` on fail.
+3. Rate-limit `places:detail:user:${uid}` 30/60s → 429 + `Retry-After`.
+4. Cache lookup: `SELECT * FROM places WHERE google_place_id = $1 AND cached_at >= now() - interval '7 days' AND cached_details <> '{}'` (single row by unique key). If hit → assemble `PlaceDetail` with `source: 'cache'`, audit `place_details_fetched` with `{ source: 'cache' }`, return 200.
+5. Cache miss (no row, expired, or empty `cached_details`):
+   - Call `getPlaceDetails(googlePlaceId)` (server-only client; 5s timeout; retry once on 5xx).
+   - Validate parsed shape (slim fields + `PlaceDetailCachedSchema`).
+   - UPSERT row via service-role: refresh slim columns + `cached_details` + `cached_at = now()`.
+   - Return 200 with `source: 'google'`. Audit `place_details_fetched` with `{ source: 'google' }`.
+6. Google failure → 502 `places_unavailable`. Google 404 (place_id no longer exists) → 404 `place_not_found`.
+
+**Concurrency / dedupe:** If two users request the same `googlePlaceId` on a cache miss in the same instant, both Google calls fire. The final UPSERT is idempotent on `(google_place_id)` so the row converges; `cached_at` reflects whichever wrote last. Tolerable: cost = at most 1 duplicate Google call per uncached place per user-burst window, which is negligible at this scale. NOT mitigating with an in-memory promise map (the app is multi-instance on Vercel). Documented as accepted trade-off.
+
+**ApiErrorCode additions** (`app/src/lib/api/response.ts`): add `'place_not_found'`, `'invalid_place_id'`. (`places_unavailable` already exists from B-009.)
+
+**AuditAction additions** (`app/src/lib/audit.ts`): add `'place_details_fetched'`, `'place_photo_proxied'`. Metadata: `google_place_id`, `source` (`'cache' | 'google'`) for details; `google_place_id`, `max_width` for photo proxy. No PII.
+
+**Component structure (frontend, Next 16 conventions per `app/AGENTS.md`):**
+- `app/src/app/places/[id]/page.tsx` — **Server Component**. Receives `params: Promise<{ id: string }>` per Next 16 async params. Calls internal fetch to `/api/places/[id]` with forwarded auth cookie via `cookies()`. Renders `<PlaceDetailView>`.
+- `app/src/app/places/[id]/loading.tsx` — skeleton: title + address bar + 3-photo gallery skeleton + hours grid placeholder (mobile-first; uses Tailwind `animate-pulse`).
+- `app/src/app/places/[id]/error.tsx` — client error boundary: `place_not_found` → "Place not found" + back link; `places_unavailable` → "Couldn't reach Google Places — try again."
+- `app/src/components/places/PlaceDetailView.tsx` — server component composing the sections: name + category badge, address + map link, contact (phone, website), `<OpeningHours>`, `<PhotoGallery>`, rating block, `<GoogleAttribution>`.
+- `app/src/components/places/PhotoGallery.tsx` — client component. Renders `<img>` tags using the photo proxy URL (`/api/places/{id}/photo/{ref}?maxWidth=800`), responsive grid, lazy loading, alt text from name. NO direct Google CDN hits.
+- `app/src/components/places/OpeningHours.tsx` — pure presentational; consumes `WeeklyHours.weekday_text` for human display + computes `open_now` from `periods` against `Intl.DateTimeFormat` in the trip's timezone (best-effort — opening hours displayed are the place's local hours).
+- `app/src/components/places/GoogleAttribution.tsx` — required Google attribution block: "Powered by Google" + per-photo author attributions (HTML from Google, sanitized via DOMPurify if added; otherwise rendered as escaped text initially — flagged for security review).
+
+**Q-Checklist (R2 query performance):**
+| # | Check | Verdict |
+|---|-------|---------|
+| Q-1 | All list queries bounded | N/A — detail is a single-row read by unique key. |
+| Q-2 | No N+1 sequential queries | PASS — single `SELECT … WHERE google_place_id = $1`; photo proxy reads same row once. |
+| Q-3 | Pagination on list endpoints | N/A — no list. |
+| Q-4 | Date-bounded analytics queries | N/A. |
+
+**Files plan (R3) — confirms R1 list:**
+
+Backend (`[backend-engineer]`):
+- `app/src/app/api/places/[googlePlaceId]/route.ts` (NEW).
+- `app/src/app/api/places/[googlePlaceId]/photo/[photoRef]/route.ts` (NEW).
+- `app/src/lib/google/places.ts` — implement `getPlaceDetails` (replace stub) + add `getPlacePhotoStream`. **SHARED FILE** — flag for code-reviewer.
+- `app/src/lib/validations/places.ts` — add `GooglePlaceIdParam`, `PhotoRefParam`, `PhotoMaxWidth`, `PhotoRefSchema`, `WeeklyHoursSchema`, `PlaceDetailCachedSchema`. **SHARED FILE** — flag.
+- `app/src/lib/types/domain.ts` — add `PhotoRef`, `DayHours`, `WeeklyHours`, `PlaceDetail`. **SHARED FILE** — flag.
+- `app/src/lib/api/response.ts` — extend `ApiErrorCode` with `place_not_found`, `invalid_place_id`. **SHARED FILE** — flag.
+- `app/src/lib/audit.ts` — extend `AuditAction` with `place_details_fetched`, `place_photo_proxied`. **SHARED FILE** — flag.
+
+Frontend (`[frontend-engineer]`):
+- `app/src/app/places/[id]/page.tsx` (NEW) + `loading.tsx` + `error.tsx`.
+- `app/src/components/places/PlaceDetailView.tsx` (NEW).
+- `app/src/components/places/PhotoGallery.tsx` (NEW).
+- `app/src/components/places/OpeningHours.tsx` (NEW).
+- `app/src/components/places/GoogleAttribution.tsx` (NEW).
+- (Optional) `app/src/lib/hooks/usePlaceDetail.ts` if the page later needs client-side refetch — not required for v1.
+
+**Shared-file overlaps:** `domain.ts`, `validations/places.ts`, `response.ts`, `audit.ts`, `lib/google/places.ts` — all backend-owned. `[scrum-master]` to sequence: backend lands shared edits first; frontend then imports `PlaceDetail` type. Parallel R3 acceptable once types are committed.
+
+**Performance AC:** Cache hit < 50ms server time (single PK lookup). Cache miss < 800ms P95 (Google detail call dominates). Photo proxy < 600ms P95 first byte (streaming).
+
+**Migration numbering for Sprint 2
+
+- `0003_invitations.sql` — B-012
+- `0004_places.sql` — B-009
+- `0006_signup_invitation.sql` — B-019
+- `0007_bookmarks.sql` — B-011 (locked at R2; supersedes earlier `0005_` placeholder)
+- (B-010 — no new migration; reuses `0004_places.sql`.)
+
+Each ships with its `*_rollback.sql` sibling. Final SOLUTION_DESIGN consolidation at sprint close will reconcile §2 schema baseline (notably places `formatted_address` rename and removal of unused `ttl_expires_at` column).
+
+---
+
+## B-011 — Bookmarks (Sprint 2, R2 — canonical)
+
+This subsection supersedes §2.10 where it conflicts. It locks the migration spec, category narrowing rules, API contracts, error codes, audit actions, and types for B-011.
+
+### B-011.1 Migration `0007_bookmarks.sql`
+
+```sql
+begin;
+
+create table public.bookmarks (
+  id          uuid primary key default gen_random_uuid(),
+  trip_id     uuid not null references public.trips(id)        on delete cascade,
+  place_id    uuid not null references public.places(id)       on delete cascade,
+  category    text not null
+                check (category in ('restaurant','sight','museum','shopping','other')),
+  notes       text check (notes is null or char_length(notes) <= 500),
+  added_by    uuid references auth.users(id) on delete set null,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now(),
+  unique (trip_id, place_id, category)
+);
+
+create index bookmarks_trip_idx  on public.bookmarks (trip_id);
+create index bookmarks_place_idx on public.bookmarks (place_id);
+
+create trigger bookmarks_set_updated_at
+  before update on public.bookmarks
+  for each row execute function public.tg_set_updated_at();
+
+alter table public.bookmarks enable row level security;
+
+create policy bookmarks_select on public.bookmarks
+  for select using (public.is_trip_member(trip_id, 'viewer'));
+create policy bookmarks_insert on public.bookmarks
+  for insert with check (
+    public.is_trip_member(trip_id, 'editor') and added_by = auth.uid()
+  );
+create policy bookmarks_update on public.bookmarks
+  for update using (public.is_trip_member(trip_id, 'editor'));
+create policy bookmarks_delete on public.bookmarks
+  for delete using (public.is_trip_member(trip_id, 'editor'));
+
+commit;
+-- Rollback (0007_bookmarks_rollback.sql):
+--   begin;
+--   drop trigger if exists bookmarks_set_updated_at on public.bookmarks;
+--   drop table if exists public.bookmarks cascade;
+--   commit;
+```
+
+Notes vs §2.10 (canonical changes):
+- ADD `updated_at timestamptz not null default now()` + `bookmarks_set_updated_at` trigger reusing `tg_set_updated_at()`.
+- ADD `CHECK char_length(notes) <= 500` (nullable allowed).
+- DROP `bookmarks_category_idx (trip_id, category)` — composite with `category` filter is low-selectivity at v1 scale and the unique index covers the `(trip_id, place_id, category)` access pattern. Re-add later if profiling demands it.
+- Keep ON DELETE CASCADE on both `trip_id` and `place_id`. `added_by` keeps SET NULL (account deletion preserves the bookmark for other trip members).
+- Reuses existing helpers: `public.is_trip_member`, `public.tg_set_updated_at` (defined in `0001_init.sql`).
+
+### B-011.2 Bookmark category enum + narrowing
+
+`BookmarkCategory` is a strict subset of `PlaceCategory`:
+
+```ts
+export type BookmarkCategory = 'restaurant' | 'sight' | 'museum' | 'shopping' | 'other';
+```
+
+`narrowCategoryForBookmark(c: PlaceCategory): BookmarkCategory` — pure, server-and-client safe; lives in `app/src/lib/bookmarks/categories.ts`.
+
+| PlaceCategory   | → BookmarkCategory | Rationale |
+|-----------------|--------------------|-----------|
+| `restaurant`    | `restaurant`        | identity |
+| `cafe`          | `restaurant`        | culinary stop, no separate bookmark slice |
+| `bar`           | `restaurant`        | culinary stop |
+| `sight`         | `sight`             | identity |
+| `park`          | `sight`             | sight-like; no dedicated nature category |
+| `museum`        | `museum`            | identity |
+| `shopping`      | `shopping`          | identity |
+| `hotel`         | `other`             | logged via accommodations, not bookmarks |
+| `transport_hub` | `other`             | logged via transport items, not bookmarks |
+| `other`         | `other`             | identity |
+
+The function is pure (`switch` over the discriminator) and exhaustive — TS will fail compile if `PlaceCategory` widens without updating it. The default selected category at POST time is the narrowed value of `places.category`; the user may override before submit (must remain in the BookmarkCategory subset).
+
+### B-011.3 API contracts
+
+Base path: `/api/trips/[tripId]/bookmarks`. All endpoints require auth + trip membership; writes require `editor`+ via `checkTripAccess`. Error envelope is the standard `{ error: { code, message, details } }`.
+
+**POST `/api/trips/[tripId]/bookmarks`** — editor+
+- Request: `{ google_place_id: string, category?: BookmarkCategory, notes?: string }` (notes ≤ 500 chars). `category` defaults to `narrowCategoryForBookmark(place.category)`.
+- Server resolves `place_id` from `google_place_id` against `places` (must already be cached by B-009/B-010). If not found → `404 place_not_cached`. (Backend MAY optionally fall back to `getPlaceDetails(google_place_id)` to populate the cache; out of scope for R3 unless trivial.)
+- 201: `{ bookmark: Bookmark }`.
+- Errors: 400 `validation_error`, 401 `unauthorized`, 403 `forbidden`, 404 `not_found` (trip), 404 `place_not_cached`, 409 `bookmark_exists`, 429 `rate_limit_exceeded`.
+- Rate limit: 10 POST/min per `(user_id, trip_id)` via existing `lib/rate-limit.ts`.
+- Audit: `bookmark_created` with `entity='bookmarks'`, `entity_id=bookmark.id`, `trip_id`.
+
+**GET `/api/trips/[tripId]/bookmarks?category=&page=&limit=`** — viewer+
+- Query: `category?: BookmarkCategory` (single filter); `page` default 1; `limit` default 50, max 200.
+- 200: `{ bookmarks: Bookmark[], page: number, limit: number, total: number }`.
+- Single Supabase select with foreign-table join: `select *, place:places(name, formatted_address, category, lat, lng)` — no N+1.
+- Order: `place(name) asc` (stable secondary `id asc`); group-by-category is computed client-side in the Places tab.
+- Errors: 400 `invalid_query`, 401, 403, 404 (trip).
+
+**PATCH `/api/trips/[tripId]/bookmarks/[id]`** — editor+
+- Request: `{ category?: BookmarkCategory, notes?: string | null }` (at least one field; notes ≤ 500).
+- 200: `{ bookmark: Bookmark }`.
+- Errors: 400 `validation_error`, 401, 403, 404 (trip or bookmark not in trip), 409 `bookmark_exists` (uniqueness collision after category change).
+- Audit: `bookmark_updated`.
+
+**DELETE `/api/trips/[tripId]/bookmarks/[id]`** — editor+
+- 204 no body.
+- Errors: 401, 403, 404.
+- Audit: `bookmark_deleted`.
+
+Cross-tenant safety: every handler calls `checkTripAccess(supabase, tripId, userId, required)` (defense-in-depth alongside RLS). Detail handlers also re-check `bookmark.trip_id === tripId` to prevent cross-trip ID swap; mismatch → 404 (no leak).
+
+### B-011.4 Shared file deltas (R3 must land first)
+
+- `app/src/lib/api/response.ts` — extend `ApiErrorCode` with `'bookmark_exists'`, `'place_not_cached'`. Add helper `bookmarkExists()` if convenient (optional).
+- `app/src/lib/audit.ts` — extend `AuditAction` with `'bookmark_created' | 'bookmark_updated' | 'bookmark_deleted'`.
+- `app/src/lib/types/domain.ts` — add:
+  ```ts
+  export type BookmarkCategory = 'restaurant' | 'sight' | 'museum' | 'shopping' | 'other';
+
+  export interface Bookmark {
+    id: string;
+    trip_id: string;
+    place_id: string;
+    category: BookmarkCategory;
+    notes: string | null;
+    added_by: string | null;
+    created_at: string;
+    updated_at: string;
+    place?: Pick<Place, 'name' | 'formatted_address' | 'category' | 'lat' | 'lng'>;
+  }
+  ```
+- `app/src/lib/validations/bookmarks.ts` (NEW): `BookmarkCreateSchema`, `BookmarkPatchSchema`, `BookmarkListQuerySchema` (extends `PageSchema` with `limit` max 200 override + optional `category`).
+- `app/src/lib/bookmarks/categories.ts` (NEW): `narrowCategoryForBookmark`, `BOOKMARK_CATEGORIES` const.
+
+### B-011.5 R2 Q-Checklist
+
+| # | Check | Verdict |
+|---|-------|---------|
+| Q-1 | List queries bounded | YES — `limit` default 50, max 200 (enforced in Zod). |
+| Q-2 | No N+1 | YES — single `select` with `place:places(...)` foreign-table join; no per-row fetch. |
+| Q-3 | Pagination on list endpoints | YES — GET supports `page`/`limit`. |
+| Q-4 | Date-bounded analytics | N/A — no analytics queries in B-011. |
+
+### B-011.6 R3 Files plan
+
+Backend (`[backend-engineer]`):
+- `app/supabase/migrations/0007_bookmarks.sql` (NEW) + `0007_bookmarks_rollback.sql` (NEW).
+- `app/src/app/api/trips/[tripId]/bookmarks/route.ts` (NEW) — GET, POST.
+- `app/src/app/api/trips/[tripId]/bookmarks/[id]/route.ts` (NEW) — PATCH, DELETE.
+- `app/src/lib/validations/bookmarks.ts` (NEW). **SHARED dir** — flag.
+- `app/src/lib/bookmarks/categories.ts` (NEW).
+- `app/src/lib/api/response.ts` — extend ApiErrorCode. **SHARED FILE** — flag.
+- `app/src/lib/audit.ts` — extend AuditAction. **SHARED FILE** — flag.
+- `app/src/lib/types/domain.ts` — add `Bookmark`, `BookmarkCategory`. **SHARED FILE** — flag.
+
+Frontend (`[frontend-engineer]`):
+- `app/src/app/trips/[id]/places/page.tsx` (NEW) — Places tab listing bookmarks grouped by category.
+- `app/src/components/bookmarks/BookmarkList.tsx`, `BookmarkItem.tsx`, `BookmarkForm.tsx`, `BookmarkDeleteDialog.tsx` (NEW).
+- `app/src/components/places/BookmarkButton.tsx` (NEW) — embedded in `PlaceDetailView` from B-010.
+- `app/src/lib/hooks/useBookmarks.ts` (NEW).
+
+Shared-file overlap with parallel B-019 (signup) work: `response.ts`, `audit.ts`, `domain.ts`. `[scrum-master]` to sequence: B-011 backend lands its shared edits first; B-019 rebases. No conflicting field renames — additive only.
+
+### B-011.7 Performance AC
+
+- POST: P95 < 300ms (one place lookup + one insert + one audit insert).
+- GET: P95 < 250ms for ≤ 200 rows with join (`bookmarks_trip_idx` + PK on places).
+- PATCH/DELETE: P95 < 200ms.
+
+### B-011.8 Rollback
+
+- DB: run `0007_bookmarks_rollback.sql` (drops trigger then table).
+- API: feature is additive — no breaking changes to existing endpoints.
+- Frontend: Places tab is a new route — removing the link from trip nav cleanly hides it.
+
+---
+
 ## Build Deviations
 
 *(deviations from this R2 baseline, recorded at R7 close of each sprint)*

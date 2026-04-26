@@ -10,7 +10,15 @@ import {
   validationError,
 } from '@/lib/api/response';
 import { logAudit } from '@/lib/audit';
-import type { Trip, TripDay } from '@/lib/types/domain';
+import type { MemberRole, Trip, TripDay } from '@/lib/types/domain';
+
+interface TripWithRoleRow extends Trip {
+  role: MemberRole;
+}
+
+interface TripJoinRow extends Trip {
+  trip_members: { role: MemberRole }[] | { role: MemberRole } | null;
+}
 
 /** GET /api/trips — list trips the current user is an accepted member of. */
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -31,16 +39,29 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const to = from + limit - 1;
 
     // RLS already restricts to accepted members via is_trip_member().
+    // Join trip_members for the current user to expose the caller's role
+    // per trip — used by clients (e.g. TripPickerDialog) to gate writes.
     const { data, error, count } = await supabase
       .from('trips')
-      .select('*', { count: 'exact' })
+      .select('*, trip_members!inner(role)', { count: 'exact' })
+      .eq('trip_members.user_id', authData.user.id)
       .order('start_date', { ascending: false })
       .range(from, to);
 
     if (error) return serverError();
 
+    const rows = (data ?? []) as TripJoinRow[];
+    const items: TripWithRoleRow[] = rows.map((row) => {
+      const { trip_members, ...trip } = row;
+      const member = Array.isArray(trip_members)
+        ? trip_members[0]
+        : trip_members;
+      const role: MemberRole = member?.role ?? 'viewer';
+      return { ...(trip as Trip), role };
+    });
+
     return NextResponse.json({
-      items: (data ?? []) as Trip[],
+      items,
       page,
       limit,
       total: count ?? 0,

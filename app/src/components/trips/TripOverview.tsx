@@ -189,6 +189,12 @@ export function TripOverview({ tripId }: TripOverviewProps) {
               Edit trip
             </Link>
           )}
+          <Link
+            href={`/trips/${trip.id}/members`}
+            className={secondaryButtonClass}
+          >
+            Members
+          </Link>
         </div>
       </div>
 

@@ -13,6 +13,11 @@ export const SignupInput = z
     email: z.string().email().max(254),
     password: PasswordComplexity,
     confirm_password: z.string(),
+    invite_token: z
+      .string()
+      .min(16)
+      .max(256)
+      .regex(/^[A-Za-z0-9_-]+$/, 'Invalid token format'),
   })
   .refine((d) => d.password === d.confirm_password, {
     message: 'Passwords do not match',

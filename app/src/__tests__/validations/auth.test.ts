@@ -11,10 +11,25 @@ describe('SignupInput', () => {
     email: 'user@example.com',
     password: 'Str0ngPassword!',
     confirm_password: 'Str0ngPassword!',
+    invite_token: 'A'.repeat(43),
   };
 
   it('accepts a valid signup payload', () => {
     expect(SignupInput.safeParse(valid).success).toBe(true);
+  });
+
+  it('rejects missing invite_token', () => {
+    const r = SignupInput.safeParse({
+      email: valid.email,
+      password: valid.password,
+      confirm_password: valid.confirm_password,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('rejects invite_token with invalid characters', () => {
+    const r = SignupInput.safeParse({ ...valid, invite_token: 'bad token!!!' + 'A'.repeat(20) });
+    expect(r.success).toBe(false);
   });
 
   it('rejects invalid email', () => {

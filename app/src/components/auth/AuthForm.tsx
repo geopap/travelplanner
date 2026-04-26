@@ -274,14 +274,9 @@ export function AuthForm({ mode }: AuthFormProps) {
                 Forgot your password?
               </Link>
             </div>
-            <div>
-              New here?{" "}
-              <Link
-                href="/sign-up"
-                className="font-medium underline underline-offset-4"
-              >
-                Create an account
-              </Link>
+            <div className="text-zinc-500 dark:text-zinc-500">
+              New here? Sign-up is invitation-only — open your invitation link
+              to create an account.
             </div>
           </>
         )}

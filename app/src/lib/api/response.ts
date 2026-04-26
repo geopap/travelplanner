@@ -8,12 +8,27 @@ export type ApiErrorCode =
   | 'forbidden'
   | 'not_found'
   | 'conflict'
-  | 'rate_limited'
+  | 'rate_limit_exceeded'
+  | 'gone'
+  | 'token_expired'
+  | 'token_revoked'
   | 'server_error'
   | 'date_shrink_blocked'
   | 'email_taken_or_invalid'
   | 'invalid_credentials'
-  | 'name_mismatch';
+  | 'name_mismatch'
+  | 'invalid_query'
+  | 'places_unavailable'
+  | 'place_not_found'
+  | 'invalid_place_id'
+  | 'invite_required'
+  | 'invite_invalid'
+  | 'invite_expired'
+  | 'invite_used'
+  | 'invite_revoked'
+  | 'invite_email_mismatch'
+  | 'bookmark_exists'
+  | 'place_not_cached';
 
 export type ApiErrorDetails = Record<string, unknown>;
 
@@ -61,7 +76,7 @@ export function conflict(message: string, details?: ApiErrorDetails): NextRespon
 export function rateLimited(retryAfterMs: number): NextResponse {
   const retrySec = Math.max(1, Math.ceil(retryAfterMs / 1000));
   return errorResponse(
-    'rate_limited',
+    'rate_limit_exceeded',
     'Too many requests',
     429,
     { retry_after_seconds: retrySec },

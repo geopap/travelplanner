@@ -18,13 +18,11 @@ export default function Home() {
           >
             Sign in
           </Link>
-          <Link
-            href="/sign-up"
-            className="inline-flex items-center justify-center h-11 px-6 rounded-full border border-zinc-300 dark:border-zinc-700 font-medium hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
-          >
-            Create an account
-          </Link>
         </div>
+        <p className="mt-4 text-sm text-zinc-500 dark:text-zinc-500">
+          Sign-up is invitation-only. Open your invitation link to create an
+          account.
+        </p>
       </div>
     </main>
   );
