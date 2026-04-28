@@ -74,8 +74,11 @@ export default async function TripPlacesPage({
   const bookmarks = parsedBookmarks.data.map(mapBookmarkRow);
   const atCap = bookmarks.length === LIMIT;
 
-  // Single batched lookup of google_place_id per place_id used.
-  const placeIds = Array.from(new Set(bookmarks.map((b) => b.place_id)));
+  // Single batched lookup of google_place_id per place_id used. Imported
+  // bookmarks may have place_id = null (no Google Places enrichment yet).
+  const placeIds = Array.from(
+    new Set(bookmarks.map((b) => b.place_id).filter((v): v is string => v !== null)),
+  );
   let googlePlaceIdByPlaceId: Record<string, string | null> = {};
   if (placeIds.length > 0) {
     const { data: placeRows, error: placeErr } = await supabase

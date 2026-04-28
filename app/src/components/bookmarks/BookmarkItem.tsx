@@ -44,11 +44,17 @@ export function BookmarkItem({
   onDelete,
 }: BookmarkItemProps) {
   const canWrite = role !== "viewer";
-  const placeName = bookmark.place?.name ?? "Untitled place";
+  // Bookmarks imported from Trello before Google Places enrichment have
+  // `place_id = null`. We fall back to the leading segment of `notes` for
+  // a name and skip the place detail link.
+  const fallbackName = bookmark.notes?.split(" — ")[0]?.trim() || "Untitled place";
+  const placeName = bookmark.place?.name ?? fallbackName;
   const address = bookmark.place?.formatted_address ?? null;
   const href = googlePlaceId
     ? `/places/${encodeURIComponent(googlePlaceId)}`
-    : `/places/${encodeURIComponent(bookmark.place_id)}`;
+    : bookmark.place_id
+      ? `/places/${encodeURIComponent(bookmark.place_id)}`
+      : null;
 
   return (
     <li
@@ -66,12 +72,16 @@ export function BookmarkItem({
             </span>
           </div>
           <h3 className="mt-2 text-base font-semibold text-zinc-900 dark:text-zinc-50">
-            <Link
-              href={href}
-              className="hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 rounded"
-            >
-              {placeName}
-            </Link>
+            {href ? (
+              <Link
+                href={href}
+                className="hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 rounded"
+              >
+                {placeName}
+              </Link>
+            ) : (
+              <span title="Not linked to a place">{placeName}</span>
+            )}
           </h3>
           {address && (
             <p

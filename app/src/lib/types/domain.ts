@@ -207,7 +207,8 @@ export type BookmarkCategory =
 export interface Bookmark {
   id: string;
   trip_id: string;
-  place_id: string;
+  /** Null for bookmarks imported from Trello before Google Places enrichment. */
+  place_id: string | null;
   category: BookmarkCategory;
   notes: string | null;
   added_by: string | null;

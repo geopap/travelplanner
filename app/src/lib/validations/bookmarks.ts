@@ -73,7 +73,7 @@ const PlaceJoinSchema = z.object({
 export const BookmarkRowSchema = z.object({
   id: z.string().uuid(),
   trip_id: z.string().uuid(),
-  place_id: z.string().uuid(),
+  place_id: z.string().uuid().nullable(),
   category: BookmarkCategorySchema,
   notes: z.string().nullable(),
   added_by: z.string().uuid().nullable(),

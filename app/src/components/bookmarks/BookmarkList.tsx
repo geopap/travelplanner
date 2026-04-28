@@ -120,7 +120,7 @@ export function BookmarkList({
                     key={bm.id}
                     bookmark={bm}
                     role={role}
-                    googlePlaceId={googlePlaceIdByPlaceId[bm.place_id] ?? null}
+                    googlePlaceId={bm.place_id ? googlePlaceIdByPlaceId[bm.place_id] ?? null : null}
                     onEdit={(b) => setEditTarget(b)}
                     onDelete={(b) => setDeleteTarget(b)}
                   />
