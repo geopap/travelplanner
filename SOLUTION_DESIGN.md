@@ -1715,7 +1715,10 @@ No standalone `POST /api/trips/[tripId]/transportation` create/update/delete end
 import { z } from 'zod';
 import { Iso4217Schema } from './common';
 
-export const TransportMode = z.enum(['flight','train','bus','car','ferry']);
+export const TransportMode = z.enum(['flight','train','bus','car','ferry','other']);
+// Sprint 4 reconciliation (B-016 Trello import): `'other'` added to Zod, the
+// `app/src/lib/types/transportation.ts` union, and the DB CHECK (relaxed in
+// migration 0011_trello_import.sql) so all three sources of truth agree.
 
 export const TransportationCreate = z.object({
   mode: TransportMode,
@@ -1751,7 +1754,8 @@ Update `app/src/lib/validations/itinerary-items.ts`:
 #### B-007.4 Types (`app/src/lib/types/domain.ts`)
 
 ```ts
-export type TransportMode = 'flight' | 'train' | 'bus' | 'car' | 'ferry';
+export type TransportMode = 'flight' | 'train' | 'bus' | 'car' | 'ferry' | 'other';
+// Sprint 4: `'other'` added — see TransportMode reconciliation note above.
 
 export interface Transportation {
   id: string;
@@ -2553,6 +2557,36 @@ Script aborts with a clear error if the var is missing or appears to be the anon
 2. **`itinerary_items.start_time`** — Trello cards have no time; importer leaves `start_time`/`end_time` null. Verify Sprint-1 day view renders null-time items.
 3. **Trip currency** — script hard-codes `base_currency='CHF'` per R1 handoff. Document in script README.
 4. **Audit log** — service-role bypasses RLS but any audit-log triggers still fire. Confirm there is no per-request `auth.uid()` requirement; if there is, the script either sets `request.jwt.claim.sub` via `set_config` or writes audit rows manually with `actor_id = <owner-uuid>`.
+
+---
+
+### Sprint 4 — Close (post-R4 final state)
+
+This subsection is the source of truth for the as-shipped state of Sprint 4. Where it differs from B-014/B-016/B-017 R2 above, this subsection wins.
+
+**Final migration list applied (in order):**
+
+1. `0011_trello_import.sql` — adds `source_card_id text` + partial unique indexes on `itinerary_items`, `accommodations`, `bookmarks`; relaxes `bookmarks.place_id` to nullable behind CHECK `(place_id is not null or source_card_id is not null)`; replaces unique constraint with partial index `bookmarks_trip_place_category_uniq`. Also drops/relaxes the `transportation.mode` CHECK to `('flight','train','bus','car','ferry','other')` (Sprint 4 widening — see below). Rollback present.
+2. `0012_expenses.sql` — creates `public.expenses`, `tg_expense_within_trip`, `get_trip_balances(uuid)`, RLS policies, indexes (per §2.11). Rollback present.
+3. `0013_avatars_storage.sql` — creates the `avatars` Storage bucket (public, 2 MB, jpg/png/webp) plus four `storage.objects` RLS policies path-scoped to `auth.uid()::text = (storage.foldername(name))[1]`. Rollback present.
+4. `0014_expense_review_fixes.sql` — **post-R4 fix-up**, added in response to [code-reviewer] / [security-reviewer] findings on B-014. Two changes: (a) introduces SQL function `public.get_trip_expense_total(p_trip_id uuid) returns numeric` (`security invoker`, `stable`, `set search_path = public`) used by `GET /api/trips/[id]/expenses` to compute `total_spent` server-side — replaces an unbounded JS-side aggregate fetch that pulled every expense row to sum in Node (potential perf cliff and a soft N+1 risk on large trips); (b) tightens `expenses_update` RLS policy with an explicit `with check (public.is_trip_member(trip_id, 'editor'))` clause — previously the policy was `using`-only, which permits a row's `trip_id` to be re-pointed at a trip the editor does not belong to. Rollback `0014_expense_review_fixes_rollback.sql` drops the function and reverts the policy to its 0012 form.
+
+**TransportMode `'other'` reconciliation:** prior to Sprint 4 the three sources of truth disagreed — Zod allowed `'other'` while the TypeScript `TransportMode` union and the DB CHECK on `transportation.mode` did not. Sprint 4 brings them into agreement: (i) DB CHECK relaxed inside `0011_trello_import.sql` (`alter table transportation drop constraint transportation_mode_check; add ... check (mode in ('flight','train','bus','car','ferry','other'))`); (ii) `app/src/lib/types/transportation.ts` widened to include `'other'`; (iii) Zod `TransportMode` already included it. The Trello importer relies on `'other'` as the safe fallback for cards whose mode cannot be inferred from the card name.
+
+**`avatars` bucket + `PATCH /api/profile`:** shipped exactly per B-017 R2 above. Avatar bytes never traverse the API — the client uploads directly to Storage with the user's session JWT (RLS enforces path scoping); the API route only updates `profiles.full_name` and `profiles.avatar_url`.
+
+**Why 0014 exists (review-driven):** B-014 cleared R3 with a JS-side `total_spent` aggregator (`select amount from expenses where trip_id=...` then `reduce`). [code-reviewer] flagged it as a Q-1 violation (unbounded read) and [security-reviewer] flagged the `expenses_update` policy gap. Both were CRITICAL/HIGH, so engineers shipped 0014 before R5 rather than carry the debt. The `get_trip_expense_total` function pattern mirrors `get_trip_balances` from 0012 — `security invoker` so the caller's RLS controls visibility; `grant execute ... to authenticated`.
+
+**Env vars (final):** `app/.env.example` documents `SUPABASE_SERVICE_ROLE_KEY` (server-only, used by `app/scripts/import-trello.ts`). No new env vars introduced beyond those listed in §8.
+
+---
+
+### Sprint 4 — Deferred issues (carried forward)
+
+These were identified during Sprint 4 review/test but deliberately deferred — they do not block sprint close.
+
+1. **`inferTransportMode` regex priority bug** — in the Trello importer's mode-inference helper, the `flight` regex (`/flight|fly/i`) is evaluated before `bus`, so a card named `"Bus to airport"` matches `flight` (because `fly` is not in the string but the order is wrong for "airport"-bearing strings) and gets imported with `mode='flight'`. Pre-flagged by [test-engineer] in the Sprint 4 R5 report. Acceptable for v1 because (a) the importer is one-shot, (b) the resulting row is manually editable in the UI, and (c) the affected card count in the Japan 2026 seed is ≤ 1. **Recommended fix next sprint:** reorder regex tests so the most specific keywords (`bus`, `ferry`, `train`) match before `flight`, or switch to a lookup table keyed on whitelisted tokens. File: `app/scripts/import-trello.ts`.
+2. **B-008 AC-6 — N+1 `fromCalls` assertion** — carryover from Sprint 3. The accommodations day-indicator integration test asserts the indicator query is single-batched, but the assertion uses a loose `expect(fromCalls.length).toBeGreaterThan(0)` instead of `=== 1`. Tracked in BACKLOG.md; not a regression introduced by Sprint 4.
 
 ---
 

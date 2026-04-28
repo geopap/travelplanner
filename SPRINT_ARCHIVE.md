@@ -168,3 +168,58 @@ Historical completed sprint items. Appended by [scrum-master] at the close of ea
 - Japan 2026 Trello import script (B-016).
 - Upstash distributed rate limiting.
 - Leaflet day map.
+
+---
+
+## Sprint 4 — Money, Profiles, Japan import (closed 2026-04-28)
+
+**Window:** 2026-04-28 (single-session R1→close, mirroring prior sprints)
+**Pipeline:** Full (10-agent, 5-round) for B-014 + B-016; Fast Track + targeted R2 for B-017
+**Release:** [v0.4.0](https://github.com/geopap/travelplanner/releases/tag/v0.4.0)
+
+### Items
+
+| ID | Title | Tier | Outcome |
+|----|-------|------|---------|
+| B-014 | Budget & expenses | Full | ✅ done — UAT PASS |
+| B-016 | Japan 2026 Trello import script | Full | ✅ done — UAT PASS-with-WARN |
+| B-017 | Profile management | Fast Track + light R2 | ✅ done — UAT PASS-with-WARN |
+
+### Deliverables
+
+- **Migrations:**
+  - `0011_trello_import.sql` — `source_card_id` column on `itinerary_items`/`accommodations`/`bookmarks`; relax `bookmarks.place_id`; widen `transportation.mode` CHECK to include `'other'`.
+  - `0012_expenses.sql` — `expenses` table + indexes + `tg_expense_within_trip` trigger + RLS + `get_trip_balances()` RPC.
+  - `0013_avatars_storage.sql` — `avatars` Storage bucket (public-read, 2MB, jpg/png/webp) + 4 path-scoped RLS policies on `storage.objects`.
+  - `0014_expense_review_fixes.sql` — `get_trip_expense_total()` RPC (replaces unbounded JS-side aggregate fetch) + `expenses_update` policy `with check` tightening.
+- **API routes added:** `/api/trips/[id]/expenses`, `/api/trips/[id]/expenses/[expenseId]`, `/api/trips/[id]/balances`, `/api/profile`.
+- **Pages added:** `/trips/[id]/budget`, `/settings/profile`, `/settings` layout.
+- **Components added:** `expenses/{ExpenseForm, ExpensesList, ExpensesSummary, ExpensesTabClient, RemoveExpenseDialog}`, `profile/{InitialsAvatar, ProfileForm}`.
+- **Hooks added:** `useExpenses`, `useBalances`.
+- **Validations added:** `expenses.ts`, `profile.ts`.
+- **Types added:** `expenses.ts`, `profile.ts`. TransportMode widened to include `'other'`.
+- **Script added:** `app/scripts/import-trello.ts` (one-shot Trello importer, idempotent via `source_card_id`, `--dry-run` flag, anon-key guard). Trello data committed at `app/scripts/data/japan-2026.json`. `npm run import:trello` script added.
+- **Env vars:** `SUPABASE_SERVICE_ROLE_KEY` (server-only, importer use) documented in `.env.example`.
+
+### Quality
+
+- **Tests:** 584 passing (37 files), +116 new from R5.
+- **R4 outcomes:** 4 HIGH fixed (2 B-016: transport-mode default + userEmail PII; 2 B-014: unbounded `total_spent` aggregate). MEDIUM cleanups: dead prop, unused import, unsafe `as` casts → Zod, cache-buster persisted to DB. LOWs deferred per CLAUDE.md gate.
+- **TransportMode reconciliation:** DB CHECK + Zod enum + TS type now agreed (all include `'other'`).
+- **`tsc --noEmit`:** clean.
+
+### Notes for next sprint
+
+- **WARN (B-016):** `inferTransportMode` regex order matches `flight` keyword "airport" before `bus`, so "Bus to airport" → flight. Cosmetic in one-shot import; user can manually correct post-import. Recommended fix: reorder regex priority. → Sprint 5 follow-up.
+- **WARN (B-017):** Server-side MIME re-validation delegated to Storage bucket policy (`allowed_mime_types`); the security outcome is correct but error shape differs from app routes. Architect-approved in R2. No follow-up planned.
+- **B-008 AC-6 carryover** — N+1 `fromCalls` assertion still missing for accommodations. Tiny follow-up.
+- **Browser UAT** — 7 SKIP items deferred to user via `app/docs/uat/sprint-4-browser-checklist.md` (consistent with Sprint 1–3 pattern).
+
+### Deferred to Sprint 5+
+
+- Leaflet day map (B-015) — slotted for Sprint 5.
+- Playwright e2e suite (carryover).
+- Upstash distributed rate limiting.
+- Ownership transfer flow.
+- Place picker → `place_id` resolver for accommodations form.
+- `inferTransportMode` regex priority fix.
