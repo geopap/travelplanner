@@ -85,7 +85,7 @@ export default async function TripBudgetPage({
   const { data: memberRows, error: memberErr } = await supabase
     .from("trip_members")
     .select(
-      "trip_id, user_id, role, status, invited_by, invited_at, accepted_at, profile:profiles!trip_members_user_id_fkey(email, full_name, avatar_url)",
+      "trip_id, user_id, role, status, invited_by, invited_at, accepted_at, profile:profiles!trip_members_profile_fk(email, full_name, avatar_url)",
     )
     .eq("trip_id", tripId)
     .eq("status", "accepted");

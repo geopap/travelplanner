@@ -138,7 +138,7 @@ export async function GET(
     const { data, error, count } = await supabase
       .from('trip_members')
       .select(
-        'trip_id, user_id, role, status, invited_by, invited_at, accepted_at, profile:profiles!trip_members_user_id_fkey(email, full_name, avatar_url)',
+        'trip_id, user_id, role, status, invited_by, invited_at, accepted_at, profile:profiles!trip_members_profile_fk(email, full_name, avatar_url)',
         { count: 'exact' },
       )
       .eq('trip_id', id)
