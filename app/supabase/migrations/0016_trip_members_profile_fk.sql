@@ -29,9 +29,22 @@
 -- target with that name). Verified by issuing the same query against
 -- a Postgres instance with both FKs in place.
 --
+-- Pre-FK backfill: any auth.users row without a matching profile gets one
+-- inserted from the auth.users record. This handles bootstrap accounts and
+-- any historical signup where the confirmation hook didn't fire. Without
+-- this, the FK creation would fail (and did fail in production on the
+-- bootstrap admin user). Idempotent.
+--
 -- ROLLBACK: see 0016_trip_members_profile_fk_rollback.sql.
 
 begin;
+
+insert into public.profiles (id, email, full_name)
+select u.id, u.email, coalesce(u.raw_user_meta_data->>'full_name', null)
+from auth.users u
+left join public.profiles p on p.id = u.id
+where p.id is null
+  and u.email is not null;
 
 alter table public.trip_members
   add constraint trip_members_profile_fk
