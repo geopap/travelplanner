@@ -19,7 +19,7 @@ import {
 import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
 
-type RouteCtx = { params: Promise<{ tripId: string; id: string }> };
+type RouteCtx = { params: Promise<{ id: string; bookmarkId: string }> };
 
 const BOOKMARK_SELECT =
   'id, trip_id, place_id, category, notes, added_by, created_at, updated_at, place:places(name, formatted_address, category, lat, lng)';
@@ -29,7 +29,7 @@ export async function PATCH(
   ctx: RouteCtx,
 ): Promise<NextResponse> {
   try {
-    const { tripId, id } = await ctx.params;
+    const { id: tripId, bookmarkId: id } = await ctx.params;
     if (!UuidSchema.safeParse(tripId).success) return notFound();
     if (!UuidSchema.safeParse(id).success) return notFound();
 
@@ -111,7 +111,7 @@ export async function DELETE(
   ctx: RouteCtx,
 ): Promise<NextResponse> {
   try {
-    const { tripId, id } = await ctx.params;
+    const { id: tripId, bookmarkId: id } = await ctx.params;
     if (!UuidSchema.safeParse(tripId).success) return notFound();
     if (!UuidSchema.safeParse(id).success) return notFound();
 

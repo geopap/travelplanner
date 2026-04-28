@@ -20,7 +20,7 @@ import { InvitationCreate } from '@/lib/validations/invitations';
 import { z } from 'zod';
 import type { Invitation } from '@/lib/types/domain';
 
-type RouteCtx = { params: Promise<{ tripId: string }> };
+type RouteCtx = { params: Promise<{ id: string }> };
 
 const INVITATION_TTL_MS = 48 * 60 * 60 * 1000; // 48h
 const INVITE_RATE_WINDOW_MS = 60 * 60 * 1000; // 1h
@@ -57,7 +57,7 @@ export async function POST(
   ctx: RouteCtx,
 ): Promise<NextResponse> {
   try {
-    const { tripId } = await ctx.params;
+    const { id: tripId } = await ctx.params;
     if (!UuidSchema.safeParse(tripId).success) return notFound();
 
     const supabase = await createSupabaseServerClient();
@@ -153,7 +153,7 @@ export async function GET(
   ctx: RouteCtx,
 ): Promise<NextResponse> {
   try {
-    const { tripId } = await ctx.params;
+    const { id: tripId } = await ctx.params;
     if (!UuidSchema.safeParse(tripId).success) return notFound();
 
     const supabase = await createSupabaseServerClient();

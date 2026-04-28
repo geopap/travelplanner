@@ -25,7 +25,7 @@ import { logAudit } from '@/lib/audit';
 import { narrowCategoryForBookmark } from '@/lib/bookmarks/categories';
 import type { PlaceCategory } from '@/lib/types/domain';
 
-type RouteCtx = { params: Promise<{ tripId: string }> };
+type RouteCtx = { params: Promise<{ id: string }> };
 
 const BOOKMARK_CREATE_WINDOW_MS = 60 * 1000; // 60s
 const BOOKMARK_CREATE_MAX = 10;
@@ -51,7 +51,7 @@ export async function POST(
   ctx: RouteCtx,
 ): Promise<NextResponse> {
   try {
-    const { tripId } = await ctx.params;
+    const { id: tripId } = await ctx.params;
     if (!UuidSchema.safeParse(tripId).success) return notFound();
 
     const supabase = await createSupabaseServerClient();
@@ -155,7 +155,7 @@ export async function GET(
   ctx: RouteCtx,
 ): Promise<NextResponse> {
   try {
-    const { tripId } = await ctx.params;
+    const { id: tripId } = await ctx.params;
     if (!UuidSchema.safeParse(tripId).success) return notFound();
 
     const supabase = await createSupabaseServerClient();
