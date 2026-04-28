@@ -108,3 +108,63 @@ Historical completed sprint items. Appended by [scrum-master] at the close of ea
 - Member role management (B-013).
 - Budget & expenses (B-014).
 - Upstash distributed rate limiting.
+
+---
+
+## Sprint 3 — Itinerary Depth + Role Management (closed 2026-04-28)
+
+**Window:** 2026-04-28 (single-session)
+**Theme:** Structured transportation + accommodations for trip itineraries; full member role management for collaborative trips.
+**Pipeline:** 10-agent, 5-round Full pipeline for all 3 items.
+**Release:** v0.3.0 — tag `v0.3.0` · see RELEASES.md
+
+### Items
+
+| ID | Title | Tier | Outcome |
+|----|-------|------|---------|
+| B-007 | Transportation fields | Full | done |
+| B-008 | Accommodations | Full | done (PASS-with-WARN: AC-6 N+1 assertion follow-up filed) |
+| B-013 | Member role management | Full (auto-upgraded from S) | done |
+
+### Deliverables
+
+- **Migrations:**
+  - `0008_transportation.sql` — `transportation` table + 1:1 FK to `itinerary_items` + `create_transport_item`/`update_transport_item` RPCs + RLS. Rollback: `0008_transportation_rollback.sql`.
+  - `0009_accommodations.sql` — `accommodations` table + trip-range trigger + `trip_day_accommodation_indicators` VIEW (`security_invoker=true`). Rollback: `0009_accommodations_rollback.sql`.
+  - `0010_member_role_mgmt.sql` — Replaces trip_members RLS delete policy; adds immutable-cols trigger; owner-self-delete guard; `change_member_role` RPC; `trip_members(trip_id,role)` index; cascade regression guard. Rollback: `0010_member_role_mgmt_rollback.sql`.
+- **API routes (new):** `GET /api/trips/[id]/transportation`, `GET+POST /api/trips/[id]/accommodations`, `GET+PATCH+DELETE /api/trips/[id]/accommodations/[id]`, `GET /api/trips/[id]/day-indicators`, `GET+PATCH+DELETE /api/trips/[id]/members/[userId]`
+- **New components:** `TransportFields`, `TransportSummary`, `AccommodationForm`, `AccommodationsList`, `AccommodationsSummary`, `RemoveAccommodationDialog`, `StayIndicator`, `AccommodationsTabClient`, `MembersList`, `MemberRoleControls`, `RemoveMemberDialog`, `EvictionListener`
+- **New hooks:** `useTransportation`, `useAccommodations`, `useDayIndicators`, `useMembers`
+- **Notable refactor:** `validations/itinerary-items.ts` → discriminated union (transport | lodging | activity | meal | note)
+- **Eviction interceptor:** `lib/utils/eviction.ts` + `lib/utils/api-client.ts` extension → 403 `not_a_member` on trip-scoped paths triggers toast + `/trips` redirect
+- **Tests:** 468 vitest tests (120 new this sprint), all passing
+- **UAT:** B-007 PASS, B-008 PASS-with-WARN, B-013 PASS (2026-04-28)
+
+### R4 Findings Resolved
+
+- 2 CRITICAL fixed (code-reviewer)
+- 9 HIGH fixed (8 code-reviewer + 1 security-reviewer)
+
+### Notable Decisions
+
+- **RPC approach for atomicity (B-007):** Supabase JS client cannot wrap multi-table inserts in a transaction; SECURITY DEFINER RPCs `create_transport_item` / `update_transport_item` ensure `itinerary_items` + `transportation` are written atomically.
+- **Discriminated union refactor (B-007):** `validations/itinerary-items.ts` converted to discriminated union so type-specific fields are validated at the schema level, not with optional spread.
+- **Accommodations as independent entity (B-008):** Accommodations are NOT children of `itinerary_items` — they span multiple days. Day indicators are computed via a VIEW rather than N+1 per-day queries.
+- **Day-indicator VIEW (B-008):** `trip_day_accommodation_indicators` uses `security_invoker=true` (inherits caller's RLS context); returns typed rows without N+1.
+- **3-layer defense for role management (B-013):** RLS policy + SECURITY DEFINER RPC (`change_member_role`) + application-level `checkTripAccess` — sole-owner self-demotion blocked at all three layers.
+- **Eviction interceptor (B-013):** `api-client.ts` extended (not replaced) to intercept 403 `not_a_member` on trip-scoped paths and evict the session client-side before redirect. `EvictionListener` mounted globally in `app/layout.tsx`.
+- **Architect path reconciliation (B-007):** R2 spec proposed nested `[tripId]/days/[dayId]/items` paths; build reconciled to existing flat `/api/trips/[id]/items` structure — functionally equivalent. SOLUTION_DESIGN.md updated at sprint close.
+
+### Follow-ups Carried Forward
+
+- `place_id` resolver for accommodation place picker — `POST /api/places/resolve` (google_place_id → internal UUID) not yet built; hotel-name path satisfies AC-1. Filed as follow-up.
+- B-008 AC-6 N+1 `fromCalls` assertion missing in automated tests — non-blocking; filed as small follow-up item.
+- Ownership transfer flow — deferred to backlog.
+
+### Deferred to Sprint 4+
+
+- Playwright e2e suite (still deferred).
+- Budget & expenses (B-014).
+- Japan 2026 Trello import script (B-016).
+- Upstash distributed rate limiting.
+- Leaflet day map.

@@ -4,6 +4,32 @@ Local reference copy. Source of truth: GitHub Releases.
 
 ---
 
+## v0.3.0 — Sprint 3: Itinerary Depth + Role Management (2026-04-28)
+
+Sprint 3 adds structured transportation and accommodation records to trip itineraries, and completes member role management — giving owners full control over collaborator permissions.
+
+### Features
+- **B-007 Transportation fields** — New `transportation` table linked 1:1 to `itinerary_items` (type='transport'). Fields: mode, carrier, confirmation, departure/arrival location + datetime (UTC). Atomic create/update via SECURITY DEFINER RPCs `create_transport_item` / `update_transport_item`. `validations/itinerary-items.ts` refactored to discriminated union. Trip overview gains a transport summary section (departure-time order). `GET /api/trips/[id]/transportation` paginated endpoint.
+- **B-008 Accommodations** — New `accommodations` table (FK to trips, independent of itinerary_items). Spans multiple days; check-in/out indicators surfaced on day views via `trip_day_accommodation_indicators` VIEW (`security_invoker=true`). `indicator_type ∈ {check_in, in_stay, check_out, same_day}` — no N+1. Optional `place_id` link with free-text `hotel_name` fallback. Full CRUD at `/api/trips/[id]/accommodations[/[id]]`; standalone `/api/trips/[id]/day-indicators` endpoint. Note: place-picker not yet wired (filed as follow-up); hotel-name path satisfies AC-1.
+- **B-013 Member role management** — No new tables; operates on existing `trip_members`. Migration replaces RLS policies: owner can update/delete other members; editor/viewer self-leave allowed; owner self-demotion blocked (409 `cannot_demote_sole_owner`). `PATCH /api/trips/[id]/members/[userId]` for role change; `DELETE` for removal. Active-session eviction: `lib/utils/eviction.ts` + `EvictionListener` component detect 403 `not_a_member` on trip-scoped paths → toast + `/trips` redirect. GET /members returns 403 for both not-found and forbidden (anti-enumeration).
+
+### Database
+- Migration `0008_transportation.sql`: `transportation` table + 1:1 FK to `itinerary_items` + `create_transport_item` / `update_transport_item` RPCs + RLS. Rollback: `0008_transportation_rollback.sql`.
+- Migration `0009_accommodations.sql`: `accommodations` table + trip-range trigger `tg_accommodation_within_trip` + `trip_day_accommodation_indicators` VIEW. Rollback: `0009_accommodations_rollback.sql`.
+- Migration `0010_member_role_mgmt.sql`: replaces `trip_members_delete` RLS policy + immutable-cols trigger + owner-self-delete guard + `change_member_role` RPC + `trip_members(trip_id,role)` index + cascade regression guard. Rollback: `0010_member_role_mgmt_rollback.sql`.
+
+### Quality
+- 468/468 vitest tests passing (120 new this sprint).
+- R4 findings resolved: 2 CRITICAL + 9 HIGH (code-reviewer 2C+8H; security-reviewer 0C+1H).
+- All 3 items UAT PASS (B-008 PASS-with-WARN on AC-6 N+1 assertion — non-blocking follow-up filed).
+
+### Follow-ups carried forward
+- `place_id` resolver for accommodation place picker (`POST /api/places/resolve`) — filed as follow-up item.
+- B-008 AC-6 N+1 `fromCalls` assertion missing in test suite — filed as small follow-up.
+- Ownership transfer flow — deferred to backlog.
+
+---
+
 ## v0.2.0 — Sprint 2: Access Control + Places (2026-04-26)
 
 Sprint 2 closes out platform access hardening and the Google Places foundation. The app is now invitation-only, fully supports collaborative trip planning via email invitations, and lets users search, view, and bookmark real-world places from Google.

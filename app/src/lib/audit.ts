@@ -25,7 +25,16 @@ export type AuditAction =
   | 'signup_orphan_unflagged'
   | 'bookmark_created'
   | 'bookmark_updated'
-  | 'bookmark_deleted';
+  | 'bookmark_deleted'
+  | 'transport_item_created'
+  | 'transport_item_updated'
+  | 'transport_item_deleted'
+  | 'accommodation_created'
+  | 'accommodation_updated'
+  | 'accommodation_deleted'
+  | 'member_role_updated'
+  | 'member_removed'
+  | 'member_left';
 
 export interface AuditParams {
   actorId: string | null;

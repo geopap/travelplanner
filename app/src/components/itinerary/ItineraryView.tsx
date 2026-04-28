@@ -9,12 +9,18 @@ import type {
   Trip,
   TripDay,
 } from "@/lib/types/domain";
+import type {
+  Transportation,
+  TransportationWithItem,
+} from "@/lib/types/transportation";
 import { apiFetch, ApiClientError } from "@/lib/utils/api-client";
 import { SkeletonDay } from "@/components/Skeletons";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { secondaryButtonClass } from "@/components/ui/FormField";
 import { DayCard } from "./DayCard";
 import { ItineraryItemForm } from "./ItineraryItemForm";
+import { useDayIndicators } from "@/lib/hooks/useDayIndicators";
+import { AccommodationForm } from "@/components/accommodations/AccommodationForm";
 
 interface ItineraryViewProps {
   tripId: string;
@@ -41,6 +47,8 @@ interface DeleteState {
 }
 
 const ITEMS_PAGE_SIZE = 200;
+const TRANSPORT_PAGE_SIZE = 100;
+const TRANSPORT_MAX_PAGES = 50; // Safety cap (5,000 segments).
 
 export function ItineraryView({ tripId }: ItineraryViewProps) {
   const [loadState, setLoadState] = useState<
@@ -51,6 +59,7 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
         role: MemberRole;
         days: TripDay[];
         itemsByDay: Record<string, ItineraryItem[]>;
+        transportationByItemId: Record<string, Transportation>;
         loadedCount: number;
         totalCount: number;
         nextPage: number;
@@ -68,23 +77,60 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
     error: null,
   });
 
+  // B-008 — accommodation indicators are fetched once for the trip and
+  // grouped by trip_day_id. The day-view "Add accommodation" CTA opens the
+  // shared <AccommodationForm/> pre-filled with the day's date.
+  const dayIndicators = useDayIndicators(tripId);
+  const [accDrawer, setAccDrawer] = useState<{
+    open: boolean;
+    dayDate: string;
+  } | null>(null);
+
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
-        // All three fetches are independent — run fully in parallel.
-        const [detail, daysRes, itemsRes] = await Promise.all([
-          apiFetch<TripDetailResponse>(`/api/trips/${tripId}`, {
-            method: "GET",
-          }),
-          apiFetch<{ items: TripDay[] }>(`/api/trips/${tripId}/days`, {
-            method: "GET",
-          }),
-          apiFetch<Paginated<ItineraryItem>>(
-            `/api/trips/${tripId}/items?page=1&limit=${ITEMS_PAGE_SIZE}`,
-            { method: "GET" },
-          ),
-        ]);
+        // All four fetches are independent — run fully in parallel.
+        // Transportation list is best-effort: a failure here must not break
+        // the itinerary, just leave the cards unenriched.
+        const [detail, daysRes, itemsRes, transportOutcome] =
+          await Promise.all([
+            apiFetch<TripDetailResponse>(`/api/trips/${tripId}`, {
+              method: "GET",
+            }),
+            apiFetch<{ items: TripDay[] }>(`/api/trips/${tripId}/days`, {
+              method: "GET",
+            }),
+            apiFetch<Paginated<ItineraryItem>>(
+              `/api/trips/${tripId}/items?page=1&limit=${ITEMS_PAGE_SIZE}`,
+              { method: "GET" },
+            ),
+            (async () => {
+              // Page through all transport segments. The list-endpoint cap
+              // would otherwise silently truncate enrichment for trips with
+              // > 100 segments — see B-007 R4 finding.
+              try {
+                const collected: TransportationWithItem[] = [];
+                let page = 1;
+                let total = 0;
+                do {
+                  const res = await apiFetch<Paginated<TransportationWithItem>>(
+                    `/api/trips/${tripId}/transportation?page=${page}&limit=${TRANSPORT_PAGE_SIZE}`,
+                    { method: "GET" },
+                  );
+                  collected.push(...res.items);
+                  total = res.total;
+                  if (res.items.length < TRANSPORT_PAGE_SIZE) break;
+                  page += 1;
+                } while (
+                  collected.length < total && page <= TRANSPORT_MAX_PAGES
+                );
+                return { ok: true as const, items: collected };
+              } catch {
+                return { ok: false as const, items: [] };
+              }
+            })(),
+          ]);
         if (cancelled) return;
 
         const days = [...daysRes.items].sort(
@@ -103,12 +149,21 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
           itemsByDay[id].sort(compareItems);
         }
 
+        const transportationByItemId: Record<string, Transportation> = {};
+        for (const t of transportOutcome.items) {
+          // Strip the joined `item` projection — store the bare row.
+          const { item: _omit, ...row } = t;
+          void _omit;
+          transportationByItemId[t.itinerary_item_id] = row;
+        }
+
         setLoadState({
           status: "ready",
           trip: detail.trip,
           role: detail.member.role,
           days,
           itemsByDay,
+          transportationByItemId,
           loadedCount: itemsRes.items.length,
           totalCount: itemsRes.total,
           nextPage: 2,
@@ -209,7 +264,7 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
     });
   }
 
-  function onSaved(item: ItineraryItem) {
+  function onSaved(item: ItineraryItem, transportation?: Transportation | null) {
     setLoadState((s) => {
       if (s.status !== "ready") return s;
       const targetDayId = item.day_id ?? drawer?.dayId ?? "";
@@ -223,7 +278,20 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
         next[targetDayId] = [...next[targetDayId], item].sort(compareItems);
       }
 
-      return { ...s, itemsByDay: next };
+      // Sync the transport map — set when present, drop when transport sub-row
+      // was deleted (e.g. type changed away from 'transport').
+      const nextTransport = { ...s.transportationByItemId };
+      if (transportation) {
+        nextTransport[item.id] = transportation;
+      } else if (transportation === null || item.type !== "transport") {
+        delete nextTransport[item.id];
+      }
+
+      return {
+        ...s,
+        itemsByDay: next,
+        transportationByItemId: nextTransport,
+      };
     });
     setDrawer(null);
   }
@@ -291,7 +359,15 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
     );
   }
 
-  const { trip, role, days, itemsByDay, loadedCount, totalCount } = loadState;
+  const {
+    trip,
+    role,
+    days,
+    itemsByDay,
+    transportationByItemId,
+    loadedCount,
+    totalCount,
+  } = loadState;
   const hasMore = loadedCount < totalCount;
 
   return (
@@ -341,9 +417,14 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
               key={day.id}
               day={day}
               items={itemsByDay[day.id] ?? []}
+              transportationByItemId={transportationByItemId}
+              indicators={dayIndicators.byDayId[day.id] ?? []}
               role={role}
               onTitleChange={onDayTitleChange}
               onAddItem={openCreate}
+              onAddAccommodation={(d) =>
+                setAccDrawer({ open: true, dayDate: d.date })
+              }
               onEditItem={openEdit}
               onDeleteItem={(_, item) =>
                 setDel({
@@ -395,8 +476,29 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
           dayDate={drawer.dayDate}
           tripBaseCurrency={trip.base_currency}
           initial={drawer.initial}
+          initialTransportation={
+            drawer.initial && drawer.initial.type === "transport"
+              ? transportationByItemId[drawer.initial.id] ?? null
+              : null
+          }
           onClose={() => setDrawer(null)}
           onSaved={onSaved}
+        />
+      )}
+
+      {accDrawer?.open && (
+        <AccommodationForm
+          mode="create"
+          tripId={trip.id}
+          tripStartDate={trip.start_date}
+          tripEndDate={trip.end_date}
+          tripBaseCurrency={trip.base_currency}
+          initialCheckInDate={accDrawer.dayDate}
+          onClose={() => setAccDrawer(null)}
+          onSaved={() => {
+            setAccDrawer(null);
+            void dayIndicators.refetch();
+          }}
         />
       )}
 

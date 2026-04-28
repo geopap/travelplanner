@@ -2,6 +2,7 @@
 // Normalizes error envelopes per SOLUTION_DESIGN §4.
 
 import type { ApiError } from "@/lib/types/domain";
+import { dispatchEviction, parseTripScopedPath } from "@/lib/utils/eviction";
 
 export class ApiClientError extends Error {
   readonly status: number;
@@ -58,6 +59,18 @@ export async function apiFetch<T>(path: string, init: JsonInit = {}): Promise<T>
     const message =
       envelope?.error?.message ??
       `Request failed with status ${response.status}`;
+
+    // B-013 AC-9: active-session eviction. If a trip-scoped API call
+    // returns 403 `not_a_member`, the user has lost membership mid-session.
+    // Notify the global listener so it can toast + redirect. Other 403
+    // codes (`forbidden`, `viewer_role`, etc.) are left untouched.
+    if (response.status === 403 && code === "not_a_member") {
+      const tripId = parseTripScopedPath(path);
+      if (tripId) {
+        dispatchEviction({ tripId, path });
+      }
+    }
+
     throw new ApiClientError(
       response.status,
       code,

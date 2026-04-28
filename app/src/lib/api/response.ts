@@ -28,7 +28,16 @@ export type ApiErrorCode =
   | 'invite_revoked'
   | 'invite_email_mismatch'
   | 'bookmark_exists'
-  | 'place_not_cached';
+  | 'place_not_cached'
+  | 'transport_payload_required'
+  | 'transport_cost_on_item_forbidden'
+  | 'accommodation_dates_outside_trip'
+  | 'accommodation_dates_invalid'
+  | 'accommodation_cost_currency_required'
+  | 'cannot_demote_sole_owner'
+  | 'owner_self_delete_forbidden'
+  | 'not_a_member'
+  | 'member_not_found';
 
 export type ApiErrorDetails = Record<string, unknown>;
 

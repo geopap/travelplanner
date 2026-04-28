@@ -1414,6 +1414,734 @@ Shared-file overlap with parallel B-019 (signup) work: `response.ts`, `audit.ts`
 
 ---
 
+## Sprint 3 — R2 Architecture Additions
+
+> Sprint 3 covers **B-007 Transportation fields**, **B-008 Accommodations**, **B-013 Member role management**.
+> The subsections below SUPERSEDE the matching baseline tables in §2.8 (`transportation`) and §2.9 (`accommodations`) where they conflict, and ADD owner-only role-management endpoints + RLS deltas to §2.3 / §4.3.
+> Migrations introduced this sprint: `0008_transportation.sql`, `0009_accommodations.sql`, `0010_member_role_mgmt.sql`. (Migration `0005` is intentionally absent in the repo; the next contiguous block is 0008–0010 — confirmed via `ls app/supabase/migrations/`.)
+
+---
+
+### B-007 — Transportation fields (Sprint 3)
+
+#### B-007.1 Schema delta — `transportation` (supersedes §2.8)
+
+The Sprint-0 baseline `transportation` table had `trip_id` + `day_id` columns and no link to `itinerary_items`. R1 confirms transportation is a **child of an `itinerary_items` row of `type='transport'`** in 1:1 ON DELETE CASCADE. Sprint 3 reshapes the table accordingly. Because no Sprint has built routes against the baseline `transportation` table yet (Sprint 1 created only the schema; no API routes exist), the migration safely drops + recreates within a single transaction.
+
+```sql
+-- 0008_transportation.sql (spec — written by [backend-engineer] in R3)
+create table public.transportation (
+  id                  uuid primary key default gen_random_uuid(),
+  itinerary_item_id   uuid not null unique
+                        references public.itinerary_items(id) on delete cascade,
+  trip_id             uuid not null
+                        references public.trips(id) on delete cascade,
+  mode                text not null
+                        check (mode in ('flight','train','bus','car','ferry')),
+  carrier             text check (carrier is null or char_length(carrier) <= 120),
+  confirmation        text check (confirmation is null or char_length(confirmation) <= 80),
+  departure_location  text check (departure_location is null or char_length(departure_location) <= 200),
+  arrival_location    text check (arrival_location is null or char_length(arrival_location) <= 200),
+  departure_time      timestamptz,
+  arrival_time        timestamptz,
+  cost                numeric(14,2) check (cost is null or cost >= 0),
+  currency            char(3) check (currency is null or currency ~ '^[A-Z]{3}$'),
+  notes               text check (notes is null or char_length(notes) <= 2000),
+  created_by          uuid references auth.users(id) on delete set null,
+  created_at          timestamptz not null default now(),
+  updated_at          timestamptz not null default now(),
+  constraint transportation_time_order
+    check (departure_time is null or arrival_time is null or arrival_time >= departure_time)
+);
+```
+
+**Indexes:**
+- `unique (itinerary_item_id)` — enforces 1:1.
+- `transportation_trip_idx (trip_id)` — covers list endpoint without joining `itinerary_items`.
+- `transportation_depart_idx (trip_id, departure_time nulls last)` — supports the trip-overview ordering (`order by departure_time nulls last`) without seq-scan; satisfies AC-6.
+
+**Denormalized `trip_id`** — kept (yes, denormalized from `itinerary_items.trip_id`) for two reasons:
+1. The list endpoint and RLS policy both filter by `trip_id`; avoiding the join keeps lookups single-table and preserves a clean `is_trip_member(trip_id, …)` invocation.
+2. Cross-tenant safety: a malicious `itinerary_item_id` swap is caught by both RLS (independent `trip_id` membership check) and a pre-insert app-layer guard ensuring `transportation.trip_id === itinerary_items.trip_id`. Backend MUST set `transportation.trip_id` server-side from the URL — never accept it from the body.
+
+**RLS:**
+```sql
+alter table public.transportation enable row level security;
+create policy transportation_select on public.transportation
+  for select using (public.is_trip_member(trip_id, 'viewer'));
+create policy transportation_insert on public.transportation
+  for insert with check (public.is_trip_member(trip_id, 'editor'));
+create policy transportation_update on public.transportation
+  for update using (public.is_trip_member(trip_id, 'editor'));
+create policy transportation_delete on public.transportation
+  for delete using (public.is_trip_member(trip_id, 'editor'));
+```
+
+**Trigger:** `transportation_set_updated_at` reusing `public.tg_set_updated_at()`.
+
+**Rollback (`0008_transportation_rollback.sql`):**
+```sql
+begin;
+drop trigger if exists transportation_set_updated_at on public.transportation;
+drop table if exists public.transportation cascade;
+commit;
+```
+The rollback recreates the Sprint-0 baseline shape only if needed for an emergency restore; in practice the Sprint-0 table had no consumers, so a drop-only rollback is acceptable.
+
+#### B-007.2 API contract — extend existing routes (no new path)
+
+R1 AC-7/AC-8 lock the design: a transport itinerary item is created/edited via the existing items endpoint, not a separate `/transportation` POST. The `/api/trips/[id]/transportation` route is **read-only** (list for the overview).
+
+**`POST /api/trips/[tripId]/days/[dayId]/items`** — extended, editor+
+- Body when `type === 'transport'`:
+  ```ts
+  {
+    type: 'transport',
+    title: string,           // shared with itinerary_items
+    start_time?: string,     // ISO-8601; if present mirrors transportation.departure_time
+    end_time?: string,       // ISO-8601; if present mirrors transportation.arrival_time
+    notes?: string,
+    place_id?: string | null,
+    transportation: {
+      mode: 'flight'|'train'|'bus'|'car'|'ferry',
+      carrier?: string,
+      confirmation?: string,
+      departure_location?: string,
+      arrival_location?: string,
+      departure_time?: string,    // ISO-8601 — stored as timestamptz UTC
+      arrival_time?: string,
+      cost?: number,
+      currency?: string,           // ISO 4217
+    }
+  }
+  ```
+- **AC-10 enforcement:** when `type='transport'`, `itinerary_items.cost` and `itinerary_items.currency` MUST be null; cost lives only on `transportation`. Validated server-side; 400 `validation_error` if client sends both.
+- **Atomicity (AC-7):** wrap the two inserts in a single Postgres transaction. Implementation note for [backend-engineer]: the simplest correct approach is a `SECURITY DEFINER` RPC `create_transport_item(p_trip_id, p_day_id, p_title, p_notes, p_place_id, p_transportation jsonb)` that performs both inserts and returns the new IDs. Rationale: the Supabase JS client cannot wrap two `.insert()` calls in a single transaction client-side; an RPC is the only clean atomic path. Defer the RPC unless [backend-engineer] confirms the client-side workaround (insert items, then insert transportation, on failure delete items) cannot meet the AC — which it can't, because a network failure between the two writes leaves a stranded items row.
+  - **Decision:** REQUIRE an RPC `create_transport_item`. This belongs in `0008_transportation.sql`. Returns `{ item_id, transportation_id }`.
+- 201: `{ item: ItineraryItem, transportation: Transportation }`.
+
+**`PATCH /api/trips/[tripId]/days/[dayId]/items/[itemId]`** — extended, editor+
+- Same atomic semantics. Three cases:
+  1. `type` unchanged + still `transport` → update both rows in single RPC `update_transport_item`.
+  2. `type` changing FROM `transport` to anything else → RPC deletes the linked `transportation` row first, then updates `itinerary_items.type`. The 1:1 unique constraint guarantees there is at most one transportation row.
+  3. `type` changing TO `transport` from another type → RPC inserts a new `transportation` row keyed to the existing `itinerary_items.id` (the body MUST include the `transportation` sub-payload; otherwise 400 `validation_error`).
+- **Decision:** REQUIRE an RPC `update_transport_item(p_item_id, p_patch jsonb, p_transportation jsonb | null, p_new_type text | null)`. Atomic. Same `0008` migration.
+- 200: `{ item: ItineraryItem, transportation: Transportation | null }`.
+
+**`GET /api/trips/[tripId]/transportation?page=&limit=`** — viewer+
+- Query: `page` default 1, `limit` default 20 max 100 (shared `PageSchema`).
+- Single Supabase select with foreign-table join: `select *, item:itinerary_items!inner(id, day_id, title)` — no N+1.
+- Order: `order by departure_time asc nulls last, id asc` (stable). Uses `transportation_depart_idx`.
+- 200: `{ items: TransportationWithItem[], page, limit, total }`.
+- AC-6 enforcement: `total` from a parallel `count` head request; the join is inner so `transportation` rows whose `itinerary_item` was deleted don't appear (CASCADE deletes the row anyway, but defense-in-depth).
+- Errors: 400 `invalid_query`, 401, 403, 404 (trip).
+
+**`GET /api/trips/[tripId]/items/[itemId]`** — extended to embed `transportation` when type='transport':
+- Response shape: `{ item: ItineraryItem, transportation?: Transportation }`. Single query with `item:itinerary_items(*, transportation:transportation(*))` foreign-table join.
+
+**`DELETE /api/trips/[tripId]/days/[dayId]/items/[itemId]`** — unchanged route; ON DELETE CASCADE on the FK removes the linked transportation row automatically. No application code change required.
+
+No standalone `POST /api/trips/[tripId]/transportation` create/update/delete endpoints. The Sprint-0 baseline §4.6 entry is **superseded** by this Sprint 3 design — only the GET list survives.
+
+#### B-007.3 Validation schema (Zod)
+
+`app/src/lib/validations/transportation.ts` (NEW):
+
+```ts
+import { z } from 'zod';
+import { Iso4217Schema } from './common';
+
+export const TransportMode = z.enum(['flight','train','bus','car','ferry']);
+
+export const TransportationCreate = z.object({
+  mode: TransportMode,
+  carrier: z.string().min(1).max(120).optional(),
+  confirmation: z.string().min(1).max(80).optional(),
+  departure_location: z.string().min(1).max(200).optional(),
+  arrival_location: z.string().min(1).max(200).optional(),
+  departure_time: z.string().datetime({ offset: true }).optional(),
+  arrival_time:   z.string().datetime({ offset: true }).optional(),
+  cost: z.number().nonnegative().max(1_000_000_000).optional(),
+  currency: Iso4217Schema.optional(),
+  notes: z.string().max(2000).optional(),
+}).refine(
+  d => !d.departure_time || !d.arrival_time || d.arrival_time >= d.departure_time,
+  { path: ['arrival_time'], message: 'arrival_time must be on or after departure_time' }
+).refine(
+  // Cost requires currency and vice versa
+  d => (d.cost == null) === (d.currency == null),
+  { path: ['currency'], message: 'cost and currency must be set together' }
+);
+
+export const TransportationPatch = TransportationCreate.partial();
+
+// Composed item-create schema lives in validations/itinerary-items.ts:
+// when type === 'transport': itinerary_items.cost / currency MUST be undefined,
+// and body.transportation MUST be present.
+```
+
+Update `app/src/lib/validations/itinerary-items.ts`:
+- `ItineraryItemCreate` becomes a discriminated union on `type`. The `transport` variant requires a `transportation: TransportationCreate` field and forbids `cost`/`currency` on the parent.
+- `ItineraryItemPatch` similarly handles the three type-change cases described in B-007.2.
+
+#### B-007.4 Types (`app/src/lib/types/domain.ts`)
+
+```ts
+export type TransportMode = 'flight' | 'train' | 'bus' | 'car' | 'ferry';
+
+export interface Transportation {
+  id: string;
+  itinerary_item_id: string;
+  trip_id: string;
+  mode: TransportMode;
+  carrier: string | null;
+  confirmation: string | null;
+  departure_location: string | null;
+  arrival_location: string | null;
+  departure_time: string | null;   // ISO-8601 UTC
+  arrival_time: string | null;
+  cost: number | null;
+  currency: string | null;
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TransportationWithItem extends Transportation {
+  item: Pick<ItineraryItem, 'id' | 'day_id' | 'title'>;
+}
+```
+
+#### B-007.5 Audit, errors
+
+- `AuditAction` additions: `'transport_item_created' | 'transport_item_updated' | 'transport_item_deleted'`. Metadata: `{ mode, has_confirmation: boolean }` — never the booking reference itself.
+- `ApiErrorCode` additions: `'transport_payload_required'` (PATCH to type=transport without `transportation` body), `'transport_cost_on_item_forbidden'`.
+
+#### B-007.6 R2 Q-Checklist
+
+| # | Check | Verdict |
+|---|-------|---------|
+| Q-1 | List queries bounded | YES — `PageSchema` enforces max 100. |
+| Q-2 | No N+1 | YES — list uses single foreign-table join; detail uses single nested select. |
+| Q-3 | Pagination | YES — `page`/`limit` on GET list. |
+| Q-4 | Date-bounded analytics | N/A — no aggregation endpoint in B-007. |
+
+#### B-007.7 R3 files plan
+
+Backend (`[backend-engineer]`):
+- `app/supabase/migrations/0008_transportation.sql` (NEW) + `0008_transportation_rollback.sql`.
+  Includes: table + indexes + RLS + trigger + RPCs `create_transport_item`, `update_transport_item`.
+- `app/src/app/api/trips/[tripId]/transportation/route.ts` (NEW) — GET list only.
+- `app/src/app/api/trips/[tripId]/days/[dayId]/items/route.ts` — extend POST to dispatch to RPC for transport.
+- `app/src/app/api/trips/[tripId]/days/[dayId]/items/[itemId]/route.ts` — extend PATCH; GET embeds transportation.
+- `app/src/lib/validations/transportation.ts` (NEW).
+- `app/src/lib/validations/itinerary-items.ts` — refactor to discriminated union. **SHARED FILE** — flag for reviewer.
+- `app/src/lib/types/domain.ts` — add `Transportation`, `TransportMode`, `TransportationWithItem`. **SHARED FILE** — flag.
+- `app/src/lib/api/response.ts` — extend `ApiErrorCode`. **SHARED FILE** — flag.
+- `app/src/lib/audit.ts` — extend `AuditAction`. **SHARED FILE** — flag.
+
+Frontend (`[frontend-engineer]`):
+- `app/src/components/itinerary/TransportationFields.tsx` (NEW) — sub-form rendered conditionally inside `ItineraryItemForm` when `type='transport'`.
+- `app/src/components/itinerary/ItineraryItemForm.tsx` — extend with type-conditional rendering + payload composition (`transportation` sub-object when type='transport').
+- `app/src/components/itinerary/ItineraryItemRow.tsx` — show mode badge + carrier on transport rows.
+- `app/src/app/trips/[id]/transportation/page.tsx` — server component listing all transport segments grouped optionally by day; uses `GET /transportation`.
+- `app/src/app/trips/[id]/page.tsx` — overview gains a "Transportation" summary (top 5 by departure_time) — calls list endpoint with `limit=5`.
+- `app/src/lib/hooks/useTransportation.ts` (NEW) — wraps GET list + invalidates on item mutation.
+
+#### B-007.8 Performance AC
+
+- POST/PATCH transport item: P95 < 500ms (one RPC, two inserts inside Postgres).
+- GET list (≤100 items): P95 < 250ms.
+- Trip overview transport block (top 5): P95 < 150ms.
+
+---
+
+### B-008 — Accommodations (Sprint 3)
+
+#### B-008.1 Schema delta — `accommodations` (supersedes §2.9)
+
+R1 AC-1 specifies "hotel name **or** place link"; the baseline §2.9 has `name not null`. Sprint 3 relaxes this and adds the place-or-name conditional + the `created_by` audit column + check-out same-day allowance (`>=`, already in baseline) + per-trip date-range guarantee (app-layer; the cross-table CHECK is rejected by Postgres because subqueries aren't allowed in CHECK constraints — defense-in-depth via trigger).
+
+```sql
+-- 0009_accommodations.sql (spec)
+create table public.accommodations (
+  id               uuid primary key default gen_random_uuid(),
+  trip_id          uuid not null references public.trips(id) on delete cascade,
+  place_id         uuid references public.places(id) on delete set null,
+  hotel_name       text check (hotel_name is null or char_length(hotel_name) between 1 and 200),
+  check_in_date    date not null,
+  check_out_date   date not null,
+  confirmation     text check (confirmation is null or char_length(confirmation) <= 80),
+  cost_per_night   numeric(14,2) check (cost_per_night is null or cost_per_night >= 0),
+  total_cost       numeric(14,2) check (total_cost is null or total_cost >= 0),
+  currency         char(3) check (currency is null or currency ~ '^[A-Z]{3}$'),
+  notes            text check (notes is null or char_length(notes) <= 2000),
+  created_by       uuid references auth.users(id) on delete set null,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now(),
+  constraint accommodations_dates_valid
+    check (check_out_date >= check_in_date),
+  constraint accommodations_name_or_place
+    check (place_id is not null or hotel_name is not null)
+);
+```
+
+**Indexes:**
+- `accommodations_trip_idx (trip_id)` — list filter.
+- `accommodations_trip_dates_idx (trip_id, check_in_date, check_out_date)` — drives both the list ordering and the day-view indicator query (range overlap).
+- `accommodations_place_idx (place_id)` — only when not null; partial.
+  ```sql
+  create index accommodations_place_idx on public.accommodations(place_id) where place_id is not null;
+  ```
+
+**Trigger:** `accommodations_set_updated_at` reusing `public.tg_set_updated_at()`.
+
+**Trip-date-range trigger** (defense-in-depth; AC-2):
+```sql
+create or replace function public.tg_accommodation_within_trip()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare
+  s date; e date;
+begin
+  select start_date, end_date into s, e from public.trips where id = new.trip_id;
+  if s is null then raise exception 'trip_not_found' using errcode = 'P0002'; end if;
+  if new.check_in_date  < s or new.check_in_date  > e then
+    raise exception 'check_in_out_of_range' using errcode = '23514';
+  end if;
+  if new.check_out_date < s or new.check_out_date > e then
+    raise exception 'check_out_out_of_range' using errcode = '23514';
+  end if;
+  return new;
+end $$;
+
+create trigger accommodations_within_trip
+  before insert or update on public.accommodations
+  for each row execute function public.tg_accommodation_within_trip();
+```
+
+**RLS:**
+```sql
+alter table public.accommodations enable row level security;
+create policy accommodations_select on public.accommodations
+  for select using (public.is_trip_member(trip_id, 'viewer'));
+create policy accommodations_insert on public.accommodations
+  for insert with check (public.is_trip_member(trip_id, 'editor'));
+create policy accommodations_update on public.accommodations
+  for update using (public.is_trip_member(trip_id, 'editor'));
+create policy accommodations_delete on public.accommodations
+  for delete using (public.is_trip_member(trip_id, 'editor'));
+```
+
+**Rollback (`0009_accommodations_rollback.sql`):**
+```sql
+begin;
+drop trigger if exists accommodations_within_trip on public.accommodations;
+drop function if exists public.tg_accommodation_within_trip();
+drop trigger if exists accommodations_set_updated_at on public.accommodations;
+drop table if exists public.accommodations cascade;
+commit;
+```
+
+#### B-008.2 API contract — full CRUD
+
+Base path: `/api/trips/[tripId]/accommodations`. Standard error envelope.
+
+| Method | Path | Role | Request | Response | Errors |
+|---|---|---|---|---|---|
+| GET | `/api/trips/[tripId]/accommodations` | viewer+ | `page`, `limit` | `{ items: AccommodationWithPlace[], page, limit, total }` | 401, 403, 404 |
+| POST | `/api/trips/[tripId]/accommodations` | editor+ | `AccommodationCreate` | `201 { accommodation }` | 400, 401, 403, 404 |
+| GET | `/api/trips/[tripId]/accommodations/[id]` | viewer+ | — | `{ accommodation: AccommodationWithPlace }` | 401, 403, 404 |
+| PATCH | `/api/trips/[tripId]/accommodations/[id]` | editor+ | `AccommodationPatch` | `{ accommodation }` | 400, 401, 403, 404 |
+| DELETE | `/api/trips/[tripId]/accommodations/[id]` | editor+ | — | `204` | 401, 403, 404 |
+
+- List uses single Supabase select: `select *, place:places(id, name, formatted_address, lat, lng)`. Order: `check_in_date asc, id asc`. Pagination: `PageSchema` (`limit` default 20, max 100). AC-6 P95 < 500ms — covered by `accommodations_trip_dates_idx`.
+- POST resolves `place_id` from optional `google_place_id` against `places` (existing helper from B-009/B-010). If neither `place_id`, `google_place_id`, nor `hotel_name` provided → 400 `validation_error` (mirrors DB CHECK).
+- AC-2 trip-range validation: app-layer pre-validation against the trip's `start_date`/`end_date` (single SELECT before insert) PLUS the DB trigger as defense-in-depth. App layer maps trigger's `check_in_out_of_range`/`check_out_out_of_range` exceptions to 400 `validation_error` with field-level detail.
+- DELETE returns 204; ON DELETE CASCADE on `trip_id` + the unique-by-id removal automatically clears day-view indicators (they are computed, not stored — see B-008.4).
+
+#### B-008.3 Validation schema (Zod)
+
+`app/src/lib/validations/accommodations.ts` (NEW):
+
+```ts
+import { z } from 'zod';
+import { IsoDateSchema, Iso4217Schema, UuidSchema } from './common';
+
+export const AccommodationCreate = z.object({
+  // EXACTLY ONE of place_id | google_place_id | hotel_name (or place_id with optional name override)
+  place_id: UuidSchema.optional(),
+  google_place_id: z.string().min(8).max(255).regex(/^[A-Za-z0-9_-]+$/).optional(),
+  hotel_name: z.string().min(1).max(200).optional(),
+  check_in_date:  IsoDateSchema,
+  check_out_date: IsoDateSchema,
+  confirmation:   z.string().min(1).max(80).optional(),
+  cost_per_night: z.number().nonnegative().max(1_000_000_000).optional(),
+  total_cost:     z.number().nonnegative().max(1_000_000_000).optional(),
+  currency:       Iso4217Schema.optional(),
+  notes:          z.string().max(2000).optional(),
+}).refine(
+  d => !!(d.place_id || d.google_place_id || d.hotel_name),
+  { path: ['hotel_name'], message: 'Provide hotel_name, place_id, or google_place_id' }
+).refine(
+  d => d.check_out_date >= d.check_in_date,
+  { path: ['check_out_date'], message: 'check_out_date must be on or after check_in_date' }
+).refine(
+  // currency required if either cost provided
+  d => !((d.cost_per_night != null || d.total_cost != null) && d.currency == null),
+  { path: ['currency'], message: 'currency required when cost provided' }
+);
+
+export const AccommodationPatch = AccommodationCreate.partial();
+
+export const AccommodationListQuery = z.object({
+  page:  z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+```
+
+#### B-008.4 Day-view indicator query — single batched read (no N+1)
+
+The day view (B-005) renders all `trip_days` for a trip in one server-component fetch. AC-4 requires a per-day "Check in: …", "Staying at: …", or "Check out: …" indicator on every day overlapped by an accommodation. The architecture choice is between (a) a Postgres view + a single SELECT joining days with accommodations, or (b) a `SECURITY DEFINER` RPC returning a structured payload. We choose **(a)** because it composes naturally with Supabase row-level security (RLS) — the view inherits RLS from underlying tables — and avoids RPC-shape coupling between backend and frontend.
+
+```sql
+-- Part of 0009_accommodations.sql:
+create or replace view public.trip_day_accommodation_indicators
+with (security_invoker = true) as
+select
+  d.id                      as day_id,
+  d.trip_id                 as trip_id,
+  a.id                      as accommodation_id,
+  coalesce(a.hotel_name, p.name) as hotel_name,
+  case
+    when d.date = a.check_in_date  and d.date = a.check_out_date then 'same_day'
+    when d.date = a.check_in_date  then 'check_in'
+    when d.date = a.check_out_date then 'check_out'
+    else 'in_stay'
+  end as indicator_type
+from public.trip_days d
+join public.accommodations a
+  on a.trip_id = d.trip_id
+  and d.date between a.check_in_date and a.check_out_date
+left join public.places p on p.id = a.place_id;
+```
+
+Notes:
+- `security_invoker = true` (Postgres 15+) means the view is queried with the caller's RLS — `is_trip_member(trip_id, 'viewer')` is enforced via the underlying `trip_days`/`accommodations` policies. No new policy required on the view.
+- Indicator semantics: `same_day` covers AC-2's "same-day stays allowed" — a 1-night stay where `check_in_date = check_out_date`. The frontend renders this as a single combined "Check in / Check out: [hotel]" badge.
+- The view is computed; no storage cost; no triggers needed for indicator maintenance.
+- Index: query plan uses `accommodations_trip_dates_idx (trip_id, check_in_date, check_out_date)` for the range join.
+
+**Frontend usage (in B-005 day-list server component):**
+
+```ts
+const { data: indicators } = await supabase
+  .from('trip_day_accommodation_indicators')
+  .select('day_id, accommodation_id, hotel_name, indicator_type')
+  .eq('trip_id', tripId);
+// Group client-side: Map<day_id, IndicatorRow[]>
+```
+
+This is a single SELECT regardless of trip length or accommodation count — explicit Q-2 N+1 mitigation.
+
+#### B-008.5 Types (`app/src/lib/types/domain.ts`)
+
+```ts
+export interface Accommodation {
+  id: string;
+  trip_id: string;
+  place_id: string | null;
+  hotel_name: string | null;
+  check_in_date: string;       // ISO date
+  check_out_date: string;
+  confirmation: string | null;
+  cost_per_night: number | null;
+  total_cost: number | null;
+  currency: string | null;
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AccommodationWithPlace extends Accommodation {
+  place?: Pick<Place, 'id' | 'name' | 'formatted_address' | 'lat' | 'lng'> | null;
+}
+
+export type AccommodationIndicatorType = 'check_in' | 'in_stay' | 'check_out' | 'same_day';
+
+export interface AccommodationDayIndicator {
+  day_id: string;
+  accommodation_id: string;
+  hotel_name: string;
+  indicator_type: AccommodationIndicatorType;
+}
+```
+
+#### B-008.6 Audit, errors
+
+- `AuditAction` additions: `'accommodation_created' | 'accommodation_updated' | 'accommodation_deleted'`. Metadata: `{ has_place_link: boolean, nights: number }`.
+- `ApiErrorCode` additions: `'accommodation_dates_out_of_trip'`, `'accommodation_name_or_place_required'`.
+
+#### B-008.7 R2 Q-Checklist
+
+| # | Check | Verdict |
+|---|-------|---------|
+| Q-1 | List queries bounded | YES — `PageSchema` max 100. |
+| Q-2 | No N+1 | YES — list joins via foreign-table; day-view indicators via single view query. |
+| Q-3 | Pagination | YES — `page`/`limit` on GET list. |
+| Q-4 | Date-bounded analytics | N/A — no aggregation in B-008 (totals are computed in B-014 expenses). |
+
+#### B-008.8 R3 files plan
+
+Backend (`[backend-engineer]`):
+- `app/supabase/migrations/0009_accommodations.sql` (NEW) + rollback. Includes table + indexes + trigger + view `trip_day_accommodation_indicators` + RLS.
+- `app/src/app/api/trips/[tripId]/accommodations/route.ts` (NEW) — GET, POST.
+- `app/src/app/api/trips/[tripId]/accommodations/[id]/route.ts` (NEW) — GET, PATCH, DELETE.
+- `app/src/lib/validations/accommodations.ts` (NEW).
+- `app/src/lib/types/domain.ts` — add `Accommodation`, `AccommodationWithPlace`, `AccommodationIndicatorType`, `AccommodationDayIndicator`. **SHARED FILE** — flag.
+- `app/src/lib/api/response.ts` — extend ApiErrorCode. **SHARED FILE** — flag.
+- `app/src/lib/audit.ts` — extend AuditAction. **SHARED FILE** — flag.
+
+Frontend (`[frontend-engineer]`):
+- `app/src/app/trips/[id]/accommodations/page.tsx` (NEW) — list grouped/sorted by check-in.
+- `app/src/components/accommodations/AccommodationsList.tsx`, `AccommodationItem.tsx`, `AccommodationForm.tsx`, `AccommodationDeleteDialog.tsx` (NEW).
+- `app/src/components/accommodations/AccommodationDayBadge.tsx` (NEW) — renders one of "Check in: …", "Check out: …", "Staying at: …", "Check in / Check out: …" badges per `AccommodationIndicatorType`.
+- `app/src/app/trips/[id]/itinerary/page.tsx` — extend the day-list server fetch to also query `trip_day_accommodation_indicators` and pass per-day badges into the day component.
+- `app/src/components/itinerary/DayCard.tsx` — render `AccommodationDayBadge` rows above the day's items.
+- `app/src/app/trips/[id]/page.tsx` — overview gains an "Accommodations" summary (top 5 by check_in_date).
+- `app/src/lib/hooks/useAccommodations.ts` (NEW).
+
+#### B-008.9 Performance AC
+
+- POST/PATCH: P95 < 300ms.
+- GET list: P95 < 300ms.
+- Day-view indicator query: P95 < 100ms for typical trips (≤ 30 days, ≤ 10 stays) — single index range scan.
+
+---
+
+### B-013 — Member role management (Sprint 3)
+
+#### B-013.1 Schema delta — no new tables
+
+R1 confirms B-013 operates entirely on the existing `trip_members` table. The Sprint-0 baseline §2.3 already enables UPDATE / DELETE for owners via `is_trip_member(trip_id, 'owner')`, so the **policies themselves do not need to change** — owners can already update roles and delete other members.
+
+What Sprint 3 ADDS is **defense-in-depth self-removal protection at the database layer** (AC-3) so that a buggy or malicious client cannot bypass the app-layer guard, plus a verification pass on `ON DELETE SET NULL` cascades for authored content (AC-8).
+
+```sql
+-- 0010_member_role_mgmt.sql (spec)
+begin;
+
+-- AC-3 / defense-in-depth: prevent a member (including an owner) from deleting
+-- their own trip_members row via the API. The current policy permits
+-- `or user_id = auth.uid()` for the "leave trip" case — we tighten this for owners only.
+-- Decision: replace the trip_members_delete policy. Self-removal remains allowed for
+-- editor/viewer (they may "leave a trip"); owner self-removal is rejected at the DB layer.
+
+drop policy if exists trip_members_delete on public.trip_members;
+
+create policy trip_members_delete on public.trip_members
+  for delete using (
+    -- Owner-of-the-trip removing someone else (possibly another owner — multi-owner allowed)
+    (public.is_trip_member(trip_id, 'owner') and user_id <> auth.uid())
+    or
+    -- Editor/viewer leaving the trip themselves
+    (user_id = auth.uid()
+     and exists (
+       select 1 from public.trip_members me
+       where me.trip_id = trip_members.trip_id
+         and me.user_id = auth.uid()
+         and me.status  = 'accepted'
+         and me.role in ('editor','viewer')
+     ))
+  );
+
+-- AC-8 cascade verification: confirm SET NULL on authored-content FKs.
+-- The Sprint-0 baseline already declares these:
+--   itinerary_items.created_by  → on delete set null  ✔
+--   bookmarks.added_by          → on delete set null  ✔ (B-011 0007 confirmed)
+--   expenses.paid_by            → on delete set null  ✔
+-- No FK changes are required. This block is intentionally a no-op in the migration —
+-- present as a documentation comment + a guard query that will RAISE if a future
+-- migration regresses the cascade rule.
+
+do $$
+declare bad int;
+begin
+  select count(*) into bad
+  from information_schema.referential_constraints rc
+  join information_schema.key_column_usage kcu
+    on kcu.constraint_name = rc.constraint_name
+   and kcu.constraint_schema = rc.constraint_schema
+  where rc.constraint_schema = 'public'
+    and rc.delete_rule <> 'SET NULL'
+    and (
+      (kcu.table_name = 'itinerary_items' and kcu.column_name = 'created_by') or
+      (kcu.table_name = 'bookmarks'        and kcu.column_name = 'added_by')  or
+      (kcu.table_name = 'expenses'         and kcu.column_name = 'paid_by')
+    );
+  if bad > 0 then
+    raise exception 'authored_content_cascade_regression';
+  end if;
+end $$;
+
+commit;
+```
+
+**Rollback (`0010_member_role_mgmt_rollback.sql`):**
+```sql
+begin;
+drop policy if exists trip_members_delete on public.trip_members;
+-- restore the Sprint-0 baseline policy (allowed self-delete for any role):
+create policy trip_members_delete on public.trip_members
+  for delete using (
+    public.is_trip_member(trip_id, 'owner')
+    or user_id = auth.uid()
+  );
+commit;
+```
+
+**Note on multi-owner promotion (AC-2):** No DB constraint change required. Promoting a member to `owner` simply UPDATEs `trip_members.role = 'owner'`; the existing `trip_members_update` policy (`is_trip_member(trip_id,'owner')`) gates this. Multiple owners coexist with equal authority. Demoting another owner is similarly an UPDATE — also gated to owner role. The only protected operation is owner self-removal (AC-3); ownership transfer is an entirely separate future backlog item per R1.
+
+#### B-013.2 API contracts — adds `PATCH` route, refines `DELETE`
+
+The Sprint-2 §4.3 entry shows `DELETE /api/trips/[id]/members?user_id=` with role "owner (or self)". Sprint 3 RESHAPES this:
+
+| Method | Path | Role | Request | Response | Errors |
+|---|---|---|---|---|---|
+| GET | `/api/trips/[tripId]/members` | viewer+ | `page`, `limit` | `{ items: (TripMember & { profile })[], total }` | 401, 403, 404 |
+| **PATCH** | **`/api/trips/[tripId]/members/[userId]`** | **owner** | `{ role: 'owner'\|'editor'\|'viewer' }` | `{ member: TripMember }` | 400, 401, 403, 404, 409 |
+| **DELETE** | **`/api/trips/[tripId]/members/[userId]`** | **owner (other) / self (non-owner)** | — | `204` | 401, 403, 404 |
+
+Path-style `[userId]` replaces the query-string variant for REST consistency with the rest of the API. The query-string form was never built in Sprint 2 (no implementation existed), so this is not a breaking change.
+
+**`PATCH /api/trips/[tripId]/members/[userId]`** — owner-only
+- Body: `{ role: 'owner' | 'editor' | 'viewer' }`. Validated by `MemberRoleUpdate` Zod schema.
+- Pre-conditions:
+  1. `requireAuth()` (401 if anon).
+  2. `checkTripAccess(tripId, 'owner')` (403 `forbidden` if requester is not an owner).
+  3. Target member exists in this trip (`select 1 from trip_members where trip_id = $1 and user_id = $2 and status='accepted'`); 404 if not.
+  4. **AC-2:** if `role === 'owner'`, no implicit demotion of any existing owner — the patch is a single-row UPDATE on the target member only. Multi-owner allowed.
+  5. **AC-3 (no-op self-demotion guard):** if the target is the requester AND the new role is not `owner`, reject with 409 `cannot_demote_self` (defense against accidentally orphaning a single-owner trip — but only blocked when there are no OTHER owners; if another owner exists, allow it). Note: this is a stricter interpretation than R1 strictly requires (R1 only forbids self-removal); the architect adds it because demoting yourself when you are the sole owner produces an orphaned no-owner trip — a state the rest of the system assumes never occurs. **Open question for [backend-engineer]: confirm acceptable; otherwise relax to "any self-demotion allowed when another owner exists".** Recommended path: enforce the relaxed form ("only block self-demotion when sole owner") — this preserves AC-2's multi-owner semantic.
+- 200: `{ member: TripMember }`.
+- Audit: `member_role_updated` with `{ from_role, to_role, target_user_id }`.
+
+**`DELETE /api/trips/[tripId]/members/[userId]`** — owner-only OR self-non-owner
+- Pre-conditions:
+  1. `requireAuth()`.
+  2. **AC-3:** if `userId === auth.uid()` AND requester is an owner → 403 `cannot_remove_self_as_owner`. The DB-layer policy enforces the same guard (defense-in-depth).
+  3. Otherwise: requester must be an owner (to remove someone else) or the target must be self (editor/viewer leaving). 403 `forbidden` if neither.
+  4. Target member exists; 404 otherwise.
+- 204 no body.
+- Audit: `member_removed` with `{ target_user_id, target_role }` (no email).
+- AC-8: ON DELETE on `auth.users` — irrelevant here; this DELETE only removes the `trip_members` row, not the user. Authored content (`itinerary_items.created_by`, `bookmarks.added_by`, `expenses.paid_by`) remains in place because those FKs reference `auth.users(id)`, not `trip_members(user_id)`. The DB-layer SET NULL only fires on `auth.users` deletion (B-013.1 cascade verification).
+
+#### B-013.3 Validation schema (Zod)
+
+`app/src/lib/validations/members.ts` (NEW or extend if it exists from Sprint 2):
+
+```ts
+import { z } from 'zod';
+
+export const TripRole = z.enum(['owner', 'editor', 'viewer']);
+
+export const MemberRoleUpdate = z.object({
+  role: TripRole,
+});
+```
+
+#### B-013.4 Active-session eviction (AC-9)
+
+When a member is removed mid-session, their next API call to any trip-scoped endpoint (e.g., `GET /api/trips/[id]`) returns **403** because `is_trip_member` is now false. The frontend handles this uniformly:
+
+**Contract:**
+1. All trip-scoped client fetches go through a shared wrapper `app/src/lib/api/client.ts` (existing). The wrapper's `handleResponse` detects a 403 with `{ error: { code: 'forbidden' | 'not_a_member' } }` on a `/api/trips/[id]/...` path and:
+   - Pushes a global toast: "You no longer have access to this trip."
+   - Calls `router.push('/trips')` to redirect.
+2. Server components that 403 on the parent trip fetch (`/trips/[id]/...` pages) return Next.js `notFound()` — AC behavior already in place from Sprint 1. The client wrapper handles in-app navigation cases (e.g., user is sitting on an open day view when their access is revoked by a parallel owner action).
+3. Realtime push (Supabase Realtime on `trip_members` row deletion) is **out of scope for Sprint 3** — eviction occurs lazily on the next API call, which is acceptable per AC-9's wording "subsequent trip API calls".
+
+**ApiErrorCode addition:** `'not_a_member'` — emitted when membership lookup returns no row mid-session (distinct from `forbidden` to give the frontend a precise eviction trigger). Frontend wrapper triggers the toast/redirect on either code for trip-scoped paths.
+
+#### B-013.5 Audit, errors
+
+- `AuditAction` additions: `'member_role_updated' | 'member_removed'`. Metadata never includes email; only `target_user_id`, `from_role`, `to_role` (for updates), `target_role` (for removals).
+- `ApiErrorCode` additions: `'cannot_remove_self_as_owner'`, `'cannot_demote_sole_owner'`, `'not_a_member'`.
+
+#### B-013.6 R2 Q-Checklist
+
+| # | Check | Verdict |
+|---|-------|---------|
+| Q-1 | List queries bounded | YES — `GET /members` already paginated (Sprint 2 baseline §4.3). |
+| Q-2 | No N+1 | YES — `GET /members` uses `select *, profile:profiles(full_name, avatar_url, email)` foreign-table join (single query). |
+| Q-3 | Pagination | YES. |
+| Q-4 | Date-bounded analytics | N/A — no aggregation. |
+
+#### B-013.7 R3 files plan
+
+Backend (`[backend-engineer]`):
+- `app/supabase/migrations/0010_member_role_mgmt.sql` (NEW) + rollback. Adjusts `trip_members_delete` policy + cascade verification block.
+- `app/src/app/api/trips/[tripId]/members/[userId]/route.ts` (NEW) — PATCH, DELETE.
+- `app/src/app/api/trips/[tripId]/members/route.ts` — confirm GET implementation matches §4.3 (single query, paginated, joins profile).
+- `app/src/lib/validations/members.ts` — add `MemberRoleUpdate` (NEW or extend).
+- `app/src/lib/api/response.ts` — extend `ApiErrorCode`. **SHARED FILE** — flag for reviewer.
+- `app/src/lib/audit.ts` — extend `AuditAction`. **SHARED FILE** — flag.
+- `app/src/lib/api/client.ts` — extend the response handler to detect trip-scoped 403/`not_a_member` and trigger toast + redirect. **SHARED FILE** — flag.
+
+Frontend (`[frontend-engineer]`):
+- `app/src/app/trips/[id]/members/page.tsx` — extend Members tab with role-change dropdown (owner-only) and remove-member button (with `ConfirmDialog`). The owner sees their own row with a disabled "Remove" button + tooltip "Owners cannot remove themselves; delete the trip instead."
+- `app/src/components/members/MemberRow.tsx` (NEW or extend) — role chip + role-change dropdown + remove button.
+- `app/src/components/members/RemoveMemberDialog.tsx` (NEW) — confirm modal naming the member.
+- `app/src/lib/hooks/useMembers.ts` — extend with `updateMemberRole` and `removeMember` mutations.
+
+#### B-013.8 Performance AC
+
+- PATCH role: P95 < 200ms (single UPDATE).
+- DELETE member: P95 < 200ms (single DELETE; cascade does not fire on `auth.users`).
+- GET list (existing): P95 < 500ms per AC-7.
+
+---
+
+### Sprint 3 — cross-cutting summary
+
+**Migrations (forward + rollback):**
+- `0008_transportation.sql` — table redesign + indexes + RLS + RPCs (`create_transport_item`, `update_transport_item`).
+- `0009_accommodations.sql` — table reshape + indexes + trip-range trigger + view `trip_day_accommodation_indicators` + RLS.
+- `0010_member_role_mgmt.sql` — replace `trip_members_delete` policy + cascade-regression guard.
+
+**Shared-file edits this sprint** (sequenced by [scrum-master]):
+- `app/src/lib/types/domain.ts` — adds Transportation, TransportMode, TransportationWithItem, Accommodation, AccommodationWithPlace, AccommodationIndicatorType, AccommodationDayIndicator. (B-007 + B-008.)
+- `app/src/lib/api/response.ts` — adds 6 new ApiErrorCodes across the three items.
+- `app/src/lib/audit.ts` — adds 8 new AuditActions across the three items.
+- `app/src/lib/validations/itinerary-items.ts` — discriminated-union refactor (B-007 only).
+- `app/src/lib/api/client.ts` — eviction handler (B-013).
+
+Sequencing: B-007 backend lands its shared edits FIRST (largest delta — itinerary-items refactor); B-008 backend rebases and adds its types; B-013 backend lands last (smallest delta). All three frontends parallel after backend shared files committed.
+
+**Breaking API changes:** none.
+- `POST /api/trips/[id]/days/[dayId]/items` extends body shape additively (the `transportation` sub-object is required only when `type='transport'`; all other type variants unchanged).
+- `DELETE /api/trips/[id]/members/[userId]` is a path-style addition; the Sprint-2 query-string form was never implemented.
+
+**R2 Q-Checklist (sprint roll-up):**
+
+| # | Check | B-007 | B-008 | B-013 |
+|---|-------|-------|-------|-------|
+| Q-1 | List queries bounded | YES | YES | YES |
+| Q-2 | No N+1 | YES | YES (foreign join + view) | YES |
+| Q-3 | Pagination on list endpoints | YES | YES | YES (existing) |
+| Q-4 | Date-bounded analytics | N/A | N/A | N/A |
+
+**Open questions for engineers:**
+1. **B-007 RPCs vs client-side compensation.** Recommendation: RPCs `create_transport_item` / `update_transport_item` (atomic). [backend-engineer] to confirm during R3; if a stronger reason emerges to use Supabase Edge Functions instead, document and update this section.
+2. **B-013 sole-owner self-demotion.** Recommendation: allow self-demotion only when another owner exists; otherwise 409 `cannot_demote_sole_owner`. [backend-engineer] to confirm interpretation aligns with R1 AC-2/AC-3 intent before implementing the guard.
+
+**Deferred items (out of Sprint 3 scope, recorded for future backlog):**
+- Ownership-transfer UX flow (separate backlog item).
+- Realtime member-eviction push (Supabase Realtime); lazy-on-next-call eviction is acceptable for v1.
+- Pending-invitation surface on Members tab (B-013 AC-10 explicitly excludes it).
+
+---
+
 ## Build Deviations
 
 *(deviations from this R2 baseline, recorded at R7 close of each sprint)*

@@ -49,6 +49,7 @@ export interface ItineraryItem {
   title: string;
   start_time: string | null; // ISO 8601 with offset
   end_time: string | null;
+  external_url: string | null;
   cost: number | null;
   currency: string | null;
   notes: string | null;
@@ -56,6 +57,15 @@ export interface ItineraryItem {
   created_at: string;
   updated_at: string;
 }
+
+// Re-export transportation types for convenience.
+export type {
+  TransportMode,
+  Transportation,
+  TransportationWithItem,
+  ItemWithTransportation,
+  ItemWithMaybeTransportation,
+} from './transportation';
 
 export interface ApiError {
   error: {

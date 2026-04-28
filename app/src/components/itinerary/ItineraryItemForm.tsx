@@ -5,8 +5,17 @@ import type {
   ItineraryItem,
   ItineraryItemType,
 } from "@/lib/types/domain";
+import type {
+  Transportation,
+  TransportationInsertDTO,
+  TransportationPatchDTO,
+} from "@/lib/types/transportation";
 import { apiFetch, ApiClientError } from "@/lib/utils/api-client";
 import { COMMON_CURRENCIES } from "@/lib/utils/currencies";
+import {
+  isoToLocalInputValue,
+  localInputToIsoWithOffset,
+} from "@/lib/utils/format";
 import {
   FormField,
   inputClass,
@@ -16,6 +25,12 @@ import {
   textareaClass,
 } from "@/components/ui/FormField";
 import { ItemTypePicker } from "./ItemTypePicker";
+import {
+  TransportFields,
+  emptyTransportFieldsValue,
+  type TransportFieldErrors,
+  type TransportFieldsValue,
+} from "./TransportFields";
 
 interface ItineraryItemFormProps {
   mode: "create" | "edit";
@@ -24,14 +39,28 @@ interface ItineraryItemFormProps {
   dayDate: string; // YYYY-MM-DD
   tripBaseCurrency: string;
   initial?: ItineraryItem;
+  /** Pre-fetched transportation row when editing a transport-type item. */
+  initialTransportation?: Transportation | null;
   onClose: () => void;
-  onSaved: (item: ItineraryItem) => void;
+  onSaved: (
+    item: ItineraryItem,
+    transportation?: Transportation | null,
+  ) => void;
+}
+
+interface ItemResponse {
+  item: ItineraryItem;
+  transportation?: Transportation | null;
 }
 
 /**
  * Drawer-style form for creating or editing an itinerary item.
  * trip_id and day_id are taken from props (URL context) and passed on the path,
- * never from the form body (B-006 AC 7).
+ * never from the form body.
+ *
+ * For type='transport', the form renders <TransportFields/> and submits a
+ * discriminated-union payload with a nested `transportation` object. The
+ * parent's cost/currency inputs are hidden (AC-10).
  */
 export function ItineraryItemForm({
   mode,
@@ -40,6 +69,7 @@ export function ItineraryItemForm({
   dayDate,
   tripBaseCurrency,
   initial,
+  initialTransportation,
   onClose,
   onSaved,
 }: ItineraryItemFormProps) {
@@ -48,10 +78,10 @@ export function ItineraryItemForm({
   );
   const [title, setTitle] = useState(initial?.title ?? "");
   const [startTime, setStartTime] = useState<string>(
-    initial?.start_time ? toLocalInputValue(initial.start_time) : "",
+    initial?.start_time ? isoToLocalInputValue(initial.start_time) : "",
   );
   const [endTime, setEndTime] = useState<string>(
-    initial?.end_time ? toLocalInputValue(initial.end_time) : "",
+    initial?.end_time ? isoToLocalInputValue(initial.end_time) : "",
   );
   const [cost, setCost] = useState<string>(
     initial?.cost !== null && initial?.cost !== undefined
@@ -63,7 +93,30 @@ export function ItineraryItemForm({
   );
   const [notes, setNotes] = useState(initial?.notes ?? "");
 
+  const [transport, setTransport] = useState<TransportFieldsValue>(() => {
+    if (initialTransportation) {
+      return {
+        mode: initialTransportation.mode,
+        carrier: initialTransportation.carrier ?? "",
+        confirmation: initialTransportation.confirmation ?? "",
+        departure_location: initialTransportation.departure_location ?? "",
+        arrival_location: initialTransportation.arrival_location ?? "",
+        departure_time: isoToLocalInputValue(initialTransportation.departure_time),
+        arrival_time: isoToLocalInputValue(initialTransportation.arrival_time),
+        cost:
+          initialTransportation.cost !== null
+            ? String(initialTransportation.cost)
+            : "",
+        currency: initialTransportation.currency ?? tripBaseCurrency,
+      };
+    }
+    return emptyTransportFieldsValue(tripBaseCurrency);
+  });
+
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [transportErrors, setTransportErrors] = useState<TransportFieldErrors>(
+    {},
+  );
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const firstFieldRef = useRef<HTMLInputElement>(null);
@@ -80,6 +133,65 @@ export function ItineraryItemForm({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, submitting]);
 
+  const isTransport = type === "transport";
+
+  function buildTransportPayload(): {
+    payload?: TransportationInsertDTO;
+    errors: TransportFieldErrors;
+  } {
+    const tErrors: TransportFieldErrors = {};
+
+    const depIso = transport.departure_time
+      ? localInputToIsoWithOffset(transport.departure_time)
+      : null;
+    if (transport.departure_time && depIso === null) {
+      tErrors.departure_time = "Invalid departure time.";
+    }
+    const arrIso = transport.arrival_time
+      ? localInputToIsoWithOffset(transport.arrival_time)
+      : null;
+    if (transport.arrival_time && arrIso === null) {
+      tErrors.arrival_time = "Invalid arrival time.";
+    }
+    if (depIso && arrIso && Date.parse(arrIso) < Date.parse(depIso)) {
+      tErrors.arrival_time = "Arrival must be on or after departure.";
+    }
+
+    let costNumber: number | null = null;
+    if (transport.cost.trim() !== "") {
+      const parsed = Number(transport.cost);
+      if (Number.isNaN(parsed) || parsed < 0) {
+        tErrors.cost = "Cost must be a positive number.";
+      } else {
+        costNumber = parsed;
+      }
+    }
+    if (costNumber !== null && !/^[A-Z]{3}$/.test(transport.currency)) {
+      tErrors.currency = "Enter a 3-letter ISO 4217 code.";
+    }
+
+    if (Object.keys(tErrors).length > 0) {
+      return { errors: tErrors };
+    }
+
+    const payload: TransportationInsertDTO = { mode: transport.mode };
+    const carrier = transport.carrier.trim();
+    if (carrier) payload.carrier = carrier;
+    const confirmation = transport.confirmation.trim();
+    if (confirmation) payload.confirmation = confirmation;
+    const dep = transport.departure_location.trim();
+    if (dep) payload.departure_location = dep;
+    const arr = transport.arrival_location.trim();
+    if (arr) payload.arrival_location = arr;
+    if (depIso) payload.departure_time = depIso;
+    if (arrIso) payload.arrival_time = arrIso;
+    if (costNumber !== null) {
+      payload.cost = costNumber;
+      payload.currency = transport.currency;
+    }
+    return { payload, errors: tErrors };
+  }
+
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setFormError(null);
@@ -93,12 +205,12 @@ export function ItineraryItemForm({
     let startIso: string | null = null;
     let endIso: string | null = null;
     if (startTime) {
-      const parsed = fromLocalInputValue(startTime);
+      const parsed = localInputToIsoWithOffset(startTime);
       if (!parsed) fieldErrors.start_time = "Invalid start time.";
       else startIso = parsed;
     }
     if (endTime) {
-      const parsed = fromLocalInputValue(endTime);
+      const parsed = localInputToIsoWithOffset(endTime);
       if (!parsed) fieldErrors.end_time = "Invalid end time.";
       else endIso = parsed;
     }
@@ -107,35 +219,90 @@ export function ItineraryItemForm({
     }
 
     let costNumber: number | null = null;
-    if (cost.trim() !== "") {
+    if (!isTransport && cost.trim() !== "") {
       const parsed = Number(cost);
       if (Number.isNaN(parsed) || parsed < 0)
         fieldErrors.cost = "Cost must be a positive number.";
       else costNumber = parsed;
     }
-
-    if (costNumber !== null && !/^[A-Z]{3}$/.test(currency)) {
+    if (!isTransport && costNumber !== null && !/^[A-Z]{3}$/.test(currency)) {
       fieldErrors.currency = "Enter a 3-letter ISO 4217 code.";
     }
 
-    if (Object.keys(fieldErrors).length > 0) {
+    let transportPayload: TransportationInsertDTO | undefined;
+    let nextTransportErrors: TransportFieldErrors = {};
+    if (isTransport) {
+      const built = buildTransportPayload();
+      nextTransportErrors = built.errors;
+      transportPayload = built.payload;
+    }
+
+    if (
+      Object.keys(fieldErrors).length > 0 ||
+      Object.keys(nextTransportErrors).length > 0
+    ) {
       setErrors(fieldErrors);
+      setTransportErrors(nextTransportErrors);
+      // Move focus to the form error region for keyboard users.
+      firstFieldRef.current?.focus();
       return;
     }
 
     setErrors({});
+    setTransportErrors({});
     setSubmitting(true);
     try {
-      const payload: Record<string, unknown> = {
-        type,
+      // Build the discriminated-union body. Transport variant nests the sub-object
+      // and never sends cost/currency on the parent (AC-10).
+      const baseBody = {
         title: trimmedTitle,
         day_id: dayId,
         start_time: startIso,
         end_time: endIso,
-        cost: costNumber,
-        currency: costNumber !== null ? currency : null,
         notes: notes.trim() || null,
       };
+
+      let body: Record<string, unknown>;
+      if (isTransport) {
+        if (!transportPayload) {
+          // Defensive — buildTransportPayload only returns undefined when errors exist.
+          setFormError("Transport details are incomplete.");
+          setSubmitting(false);
+          return;
+        }
+        if (mode === "create") {
+          body = {
+            ...baseBody,
+            type: "transport",
+            transportation: transportPayload,
+          };
+        } else {
+          // PATCH: send a TransportationPatchDTO that nulls fields the user cleared.
+          const patch: TransportationPatchDTO = {
+            mode: transportPayload.mode,
+            carrier: transportPayload.carrier ?? null,
+            confirmation: transportPayload.confirmation ?? null,
+            departure_location: transportPayload.departure_location ?? null,
+            arrival_location: transportPayload.arrival_location ?? null,
+            departure_time: transportPayload.departure_time ?? null,
+            arrival_time: transportPayload.arrival_time ?? null,
+            cost: transportPayload.cost ?? null,
+            currency: transportPayload.currency ?? null,
+          };
+          body = {
+            ...baseBody,
+            type: "transport",
+            transportation: patch,
+          };
+        }
+      } else {
+        body = {
+          ...baseBody,
+          type,
+          cost: costNumber,
+          currency: costNumber !== null ? currency : null,
+        };
+      }
 
       const path =
         mode === "create"
@@ -143,11 +310,11 @@ export function ItineraryItemForm({
           : `/api/trips/${tripId}/items/${initial?.id}`;
       const method = mode === "create" ? "POST" : "PATCH";
 
-      const res = await apiFetch<{ item: ItineraryItem }>(path, {
+      const res = await apiFetch<ItemResponse>(path, {
         method,
-        body: payload,
+        body,
       });
-      onSaved(res.item);
+      onSaved(res.item, res.transportation ?? null);
     } catch (err) {
       const message =
         err instanceof ApiClientError
@@ -223,7 +390,13 @@ export function ItineraryItemForm({
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 className={inputClass}
-                placeholder="e.g. Dinner at Narisawa"
+                placeholder={
+                  isTransport
+                    ? "e.g. Zurich → Tokyo"
+                    : "e.g. Dinner at Narisawa"
+                }
+                aria-required="true"
+                aria-invalid={errors.title ? true : undefined}
               />
             </FormField>
 
@@ -240,6 +413,7 @@ export function ItineraryItemForm({
                   value={startTime}
                   onChange={(e) => setStartTime(e.target.value)}
                   className={inputClass}
+                  aria-invalid={errors.start_time ? true : undefined}
                 />
               </FormField>
               <FormField
@@ -254,43 +428,49 @@ export function ItineraryItemForm({
                   value={endTime}
                   onChange={(e) => setEndTime(e.target.value)}
                   className={inputClass}
+                  aria-invalid={errors.end_time ? true : undefined}
                 />
               </FormField>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField id="cost" label="Cost" error={errors.cost}>
-                <input
-                  id="cost"
-                  type="number"
-                  inputMode="decimal"
-                  min="0"
-                  step="0.01"
-                  value={cost}
-                  onChange={(e) => setCost(e.target.value)}
-                  className={inputClass}
-                  placeholder="0.00"
-                />
-              </FormField>
-              <FormField
-                id="currency"
-                label="Currency"
-                error={errors.currency}
-              >
-                <select
+            {/* Cost/currency hidden for transport — they live on the transportation row. */}
+            {!isTransport && (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <FormField id="cost" label="Cost" error={errors.cost}>
+                  <input
+                    id="cost"
+                    type="number"
+                    inputMode="decimal"
+                    min="0"
+                    step="0.01"
+                    value={cost}
+                    onChange={(e) => setCost(e.target.value)}
+                    className={inputClass}
+                    placeholder="0.00"
+                    aria-invalid={errors.cost ? true : undefined}
+                  />
+                </FormField>
+                <FormField
                   id="currency"
-                  value={currency}
-                  onChange={(e) => setCurrency(e.target.value)}
-                  className={selectClass}
+                  label="Currency"
+                  error={errors.currency}
                 >
-                  {COMMON_CURRENCIES.map((c) => (
-                    <option key={c.code} value={c.code}>
-                      {c.code}
-                    </option>
-                  ))}
-                </select>
-              </FormField>
-            </div>
+                  <select
+                    id="currency"
+                    value={currency}
+                    onChange={(e) => setCurrency(e.target.value)}
+                    className={selectClass}
+                    aria-invalid={errors.currency ? true : undefined}
+                  >
+                    {COMMON_CURRENCIES.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.code}
+                      </option>
+                    ))}
+                  </select>
+                </FormField>
+              </div>
+            )}
 
             <FormField id="notes" label="Notes" error={errors.notes}>
               <textarea
@@ -303,6 +483,15 @@ export function ItineraryItemForm({
                 placeholder="Confirmation numbers, addresses, reminders…"
               />
             </FormField>
+
+            {isTransport && (
+              <TransportFields
+                value={transport}
+                onChange={setTransport}
+                errors={transportErrors}
+                disabled={submitting}
+              />
+            )}
           </div>
 
           <div className="mt-6 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
@@ -330,26 +519,4 @@ export function ItineraryItemForm({
       </div>
     </div>
   );
-}
-
-// Convert ISO-with-offset datetime to a value usable by <input type="datetime-local">.
-function toLocalInputValue(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const yyyy = d.getFullYear();
-  const mm = pad(d.getMonth() + 1);
-  const dd = pad(d.getDate());
-  const hh = pad(d.getHours());
-  const min = pad(d.getMinutes());
-  return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
-}
-
-// Convert a datetime-local value (local wallclock) to an ISO string with the
-// user's current offset so the server can store it in UTC.
-function fromLocalInputValue(value: string): string | null {
-  if (!value) return null;
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString();
 }

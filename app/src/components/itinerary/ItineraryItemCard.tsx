@@ -1,8 +1,11 @@
 import type { ItineraryItem, ItineraryItemType } from "@/lib/types/domain";
+import type { Transportation } from "@/lib/types/transportation";
 import { formatCurrency, formatTime } from "@/lib/utils/format";
 
 interface ItineraryItemCardProps {
   item: ItineraryItem;
+  /** When item.type === 'transport' the day-view enriches the card with structured fields. */
+  transportation?: Transportation | null;
   canEdit: boolean;
   onEdit: () => void;
   onDelete: () => void;
@@ -41,6 +44,7 @@ const TYPE_META: Record<
 
 export function ItineraryItemCard({
   item,
+  transportation,
   canEdit,
   onEdit,
   onDelete,
@@ -49,6 +53,19 @@ export function ItineraryItemCard({
   const start = formatTime(item.start_time);
   const end = formatTime(item.end_time);
   const timeLabel = start && end ? `${start} – ${end}` : start || end || "";
+
+  // Transport-specific structured display (AC-1 readout in day view).
+  const isTransport = item.type === "transport";
+  const transportFromTo =
+    transportation && (transportation.departure_location || transportation.arrival_location)
+      ? `${transportation.departure_location ?? "—"} → ${transportation.arrival_location ?? "—"}`
+      : "";
+  const transportCarrier = transportation?.carrier ?? null;
+  const transportConfirmation = transportation?.confirmation ?? null;
+  const transportCost =
+    transportation && transportation.cost !== null
+      ? formatCurrency(transportation.cost, transportation.currency)
+      : null;
 
   return (
     <li className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
@@ -73,6 +90,20 @@ export function ItineraryItemCard({
           <h4 className="mt-1 text-sm font-semibold text-zinc-900 dark:text-zinc-50">
             {item.title}
           </h4>
+          {isTransport && (transportCarrier || transportConfirmation) && (
+            <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+              {transportCarrier}
+              {transportCarrier && transportConfirmation && " · "}
+              {transportConfirmation && (
+                <span className="font-mono">{transportConfirmation}</span>
+              )}
+            </p>
+          )}
+          {isTransport && transportFromTo && (
+            <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300 break-words">
+              {transportFromTo}
+            </p>
+          )}
           {item.notes && (
             <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap">
               {item.notes}
@@ -81,6 +112,11 @@ export function ItineraryItemCard({
           {item.cost !== null && (
             <p className="mt-2 text-sm font-medium text-zinc-800 dark:text-zinc-200">
               {formatCurrency(item.cost, item.currency)}
+            </p>
+          )}
+          {transportCost && (
+            <p className="mt-2 text-sm font-medium text-zinc-800 dark:text-zinc-200">
+              {transportCost}
             </p>
           )}
         </div>

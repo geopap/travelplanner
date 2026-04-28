@@ -16,6 +16,8 @@ import {
 } from "@/lib/utils/format";
 import { SkeletonCard } from "@/components/Skeletons";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
+import { TransportSummary } from "@/components/trip-overview/TransportSummary";
+import { AccommodationsSummary } from "@/components/accommodations/AccommodationsSummary";
 import {
   dangerButtonClass,
   primaryButtonClass,
@@ -219,6 +221,21 @@ export function TripOverview({ tripId }: TripOverviewProps) {
           }
         />
       </dl>
+
+      <TransportSummary tripId={trip.id} canEdit={canEdit} />
+
+      <AccommodationsSummary tripId={trip.id} canEdit={canEdit} />
+
+      {canEdit && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Link
+            href={`/trips/${trip.id}/accommodations`}
+            className={secondaryButtonClass}
+          >
+            Manage accommodations
+          </Link>
+        </div>
+      )}
 
       {canDelete && (
         <div className="mt-10 rounded-2xl border border-red-200 dark:border-red-900 bg-red-50/40 dark:bg-red-950/30 p-5">

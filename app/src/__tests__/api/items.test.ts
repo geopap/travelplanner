@@ -47,7 +47,25 @@ function makeChain(table: string) {
     return {
       select: () => ({
         single: async () => ({
-          data: { id: 'new-item-id', ...payload },
+          // Return a fully-populated row that round-trips through
+          // `ItineraryItemRowSchema` (uuid + nullable timestamp shape).
+          data: {
+            id: '11111111-1111-4111-8111-111111111111',
+            trip_id: FIXED_TRIP_ID,
+            day_id: FIXED_DAY_ID,
+            type: 'activity',
+            title: 'mock',
+            start_time: null,
+            end_time: null,
+            external_url: null,
+            cost: null,
+            currency: null,
+            notes: null,
+            created_by: FIXED_USER_ID,
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+            ...payload,
+          },
           error: null,
         }),
       }),

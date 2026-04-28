@@ -2,17 +2,26 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ItineraryItem, MemberRole, TripDay } from "@/lib/types/domain";
+import type { Transportation } from "@/lib/types/transportation";
+import type { AccommodationDayIndicator } from "@/lib/types/accommodations";
 import { apiFetch, ApiClientError } from "@/lib/utils/api-client";
 import { formatDate } from "@/lib/utils/format";
 import { EmptyState } from "@/components/EmptyState";
 import { ItineraryItemCard } from "./ItineraryItemCard";
+import { StayIndicator } from "@/components/accommodations/StayIndicator";
 
 interface DayCardProps {
   day: TripDay;
   items: ItineraryItem[];
+  /** Transport rows keyed by itinerary_item_id — enriches transport-type cards. */
+  transportationByItemId?: Record<string, Transportation>;
+  /** B-008 — accommodation indicators for this day (0..n rows). */
+  indicators?: AccommodationDayIndicator[];
   role: MemberRole;
   onTitleChange: (dayId: string, title: string | null) => void;
   onAddItem: (dayId: string) => void;
+  /** B-008 — open the accommodation form pre-filled with this day's date. */
+  onAddAccommodation?: (day: TripDay) => void;
   onEditItem: (dayId: string, item: ItineraryItem) => void;
   onDeleteItem: (dayId: string, item: ItineraryItem) => void;
 }
@@ -20,9 +29,12 @@ interface DayCardProps {
 export function DayCard({
   day,
   items,
+  transportationByItemId,
+  indicators,
   role,
   onTitleChange,
   onAddItem,
+  onAddAccommodation,
   onEditItem,
   onDeleteItem,
 }: DayCardProps) {
@@ -145,6 +157,18 @@ export function DayCard({
         </span>
       </header>
 
+      {indicators && indicators.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {indicators.map((ind) => (
+            <StayIndicator
+              key={ind.accommodation_id}
+              type={ind.indicator_type}
+              name={ind.hotel_name ?? ""}
+            />
+          ))}
+        </div>
+      )}
+
       <div className="mt-4">
         {items.length === 0 ? (
           canEdit ? (
@@ -179,6 +203,11 @@ export function DayCard({
               <ItineraryItemCard
                 key={item.id}
                 item={item}
+                transportation={
+                  item.type === "transport"
+                    ? transportationByItemId?.[item.id] ?? null
+                    : null
+                }
                 canEdit={canEdit}
                 onEdit={() => onEditItem(day.id, item)}
                 onDelete={() => onDeleteItem(day.id, item)}
@@ -194,6 +223,16 @@ export function DayCard({
             className="mt-3 w-full h-10 rounded-lg border border-dashed border-zinc-300 dark:border-zinc-700 text-sm font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800"
           >
             + Add another item
+          </button>
+        )}
+
+        {canEdit && onAddAccommodation && (
+          <button
+            type="button"
+            onClick={() => onAddAccommodation(day)}
+            className="mt-2 w-full h-10 rounded-lg border border-dashed border-indigo-300 dark:border-indigo-900 text-sm font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/40"
+          >
+            + Add accommodation for this day
           </button>
         )}
       </div>

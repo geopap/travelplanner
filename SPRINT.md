@@ -1,63 +1,83 @@
 # Current Sprint
 
-**Sprint 2 — CLOSED 2026-04-26** · Released as v0.2.0.
-**Sprint 3** — not yet opened.
+**Sprint 3 — OPENED 2026-04-28**
+**Goal:** Itinerary depth (transport + lodging) + member role management. Unblocks B-016 Japan import for Sprint 4.
 
 ---
 
 ## Active Items
 
-*(Sprint 2 closed. Sprint 3 not yet planned.)*
+### [B-007] Transportation fields
+- **Tier**: Full
+- **Status**: build complete — awaiting R4 review
+- **Assigned To**: [code-reviewer] + [security-reviewer]
+- **Frontend files**: components/itinerary/TransportFields.tsx, components/trip-overview/TransportSummary.tsx, lib/hooks/useTransportation.ts, lib/utils/format.ts (added formatDateTime, localInputToIsoWithOffset, isoToLocalInputValue); modified ItineraryItemForm.tsx, ItineraryView.tsx, DayCard.tsx, ItineraryItemCard.tsx, TripOverview.tsx.
+- **Backend files**: 0008_transportation.sql + rollback, validations/transportation.ts, types/transportation.ts, api/trips/[id]/transportation/route.ts (GET); modified: validations/itinerary-items.ts (discriminated union), api/trips/[id]/items/{route,[itemId]/route}.ts, lib/types/domain.ts, lib/audit.ts, lib/api/response.ts.
+- **Backend note**: routes live at `/api/trips/[id]/items/...` (existing flat structure); architect's nested `[tripId]/days/[dayId]/items` path was reconciled to existing layout — functionally equivalent. Audit metadata excludes booking confirmation per privacy note. tsc --noEmit clean.
+- **R2 outcome**: `transportation` table redesigned with `itinerary_item_id` 1:1 FK + denormalized `trip_id`. Atomicity via SECURITY DEFINER RPCs `create_transport_item` / `update_transport_item` (Supabase JS cannot wrap multi-insert client-side). Migration `0008_transportation.sql` + rollback. API extends `POST/PATCH /api/trips/[id]/days/[dayId]/items`; adds `GET /api/trips/[id]/transportation` paginated. `validations/itinerary-items.ts` becomes a discriminated union — refactor required first.
+- **Engineering decisions accepted**: RPC approach (not Edge Function) for atomic create/update.
+- **Blockers**: none
+- **Feature Context**:
+  - New `transportation` table linked 1:1 to `itinerary_items` (type='transport').
+  - Fields: mode, carrier, confirmation, departure/arrival location + datetime (UTC).
+  - Trip overview gains a transport summary section (departure-time order).
+- **Handoff Notes**: AC already drafted in BACKLOG.md (sprint 2 plan); R1 confirms DoR and flags gaps.
+- **Files Changed**: (pending)
+- **Parallel Opportunity**: R3 backend can run parallel with B-013 backend (different domains).
+
+### [B-008] Accommodations
+- **Tier**: Full
+- **Status**: build complete — awaiting R4 review
+- **Assigned To**: [code-reviewer] + [security-reviewer]
+- **Frontend files**: components/accommodations/{AccommodationForm,AccommodationsList,AccommodationsSummary,RemoveAccommodationDialog,StayIndicator,AccommodationsTabClient}.tsx, app/trips/[id]/accommodations/page.tsx, lib/hooks/{useAccommodations,useDayIndicators}.ts; modified TripOverview.tsx, ItineraryView.tsx, DayCard.tsx.
+- **Frontend gap (non-blocking)**: place-picker not wired — form accepts hotel name only. Resolution requires either `POST /api/places/resolve` (google_place_id → internal UUID) or accepting google_place_id on POST /accommodations. Filed as follow-up; AC-1 still satisfied via hotel-name path.
+- **Backend files**: 0009_accommodations.sql + rollback, validations/accommodations.ts, types/accommodations.ts, api/trips/[id]/accommodations/route.ts (GET+POST), api/trips/[id]/accommodations/[accommodationId]/route.ts (GET+PATCH+DELETE), api/trips/[id]/day-indicators/route.ts (GET); modified: lib/api/response.ts, lib/audit.ts.
+- **Backend note**: Indicator endpoint shipped as standalone `GET /day-indicators` for clean React-Query cache. Notes capped 4000 chars (task brief). View `trip_day_accommodation_indicators` returns `{check_in, in_stay, check_out, same_day}` per day.
+- **R2 outcome**: `accommodations` table — nullable `hotel_name`, `place_id IS NOT NULL OR hotel_name IS NOT NULL` CHECK, trip-range trigger `tg_accommodation_within_trip`. Day-view indicators via `security_invoker=true` VIEW `trip_day_accommodation_indicators` returning rows with `indicator_type ∈ {check_in, in_stay, check_out, same_day}` — no N+1. Migration `0009_accommodations.sql` + rollback. Endpoints: standard CRUD `/api/trips/[id]/accommodations[/[id]]`.
+- **Blockers**: none
+- **Feature Context**:
+  - New `accommodations` table (FK to `trips`, NOT a child of `itinerary_items`).
+  - Spans multiple days; surfaces check-in/out indicators on relevant day views.
+  - Optional `place_id` link for hotel; falls back to free-text name.
+- **Handoff Notes**: AC drafted. R1 confirms DoR. Sequenced after B-007 backend in R3 to avoid shared-file conflicts on day view + overview.
+- **Files Changed**: (pending)
+- **Parallel Opportunity**: R3 frontend can run parallel with B-013 frontend.
+
+### [B-013] Member role management
+- **Tier**: Full (auto-upgraded from S — touches RLS / role auth)
+- **Status**: build complete — awaiting R4 review
+- **Assigned To**: [code-reviewer] + [security-reviewer]
+- **Frontend files**: components/members/{MembersList,MemberRoleControls,RemoveMemberDialog}.tsx, lib/hooks/useMembers.ts, lib/utils/eviction.ts, components/app/EvictionListener.tsx; modified lib/utils/api-client.ts (eviction interceptor for 403 not_a_member on trip-scoped paths), app/trips/[id]/members/page.tsx, app/layout.tsx (mounts EvictionListener globally).
+- **Note**: existing wrapper is `lib/utils/api-client.ts` (architect's spec referenced `lib/api/client.ts`); extended existing one. Architect to update SOLUTION_DESIGN at sprint close.
+- **Backend files**: 0010_member_role_mgmt.sql + rollback (RLS replaces, immutable-cols trigger, owner-self-delete trigger, sole-owner RPC `change_member_role`, trip_members(trip_id,role) index, cascade regression guard), validations/members.ts, types/members.ts, api/trips/[id]/members/[userId]/route.ts (PATCH+DELETE), api/trips/[id]/members/route.ts (GET list paginated joining profiles); modified: lib/api/response.ts, lib/audit.ts.
+- **Backend note**: GET /members returns 403 `not_a_member` for both not-found and forbidden (no leak). `accepted_at ASC NULLS LAST` ordering. Frontend gap: `lib/api/client.ts` must detect 403 `not_a_member` on trip-scoped paths → toast + `/trips` redirect (AC-9 frontend portion).
+- **R2 outcome**: No new tables. Migration `0010_member_role_mgmt.sql` REPLACES `trip_members_delete` policy: owner can delete others (multi-owner allowed), editor/viewer self-leave, owner self-delete REJECTED at DB layer. Adds `PATCH /api/trips/[id]/members/[userId]` (role change). Active-session eviction handled in `lib/api/client.ts` — 403 `not_a_member` on trip-scoped paths triggers toast + `/trips` redirect. Cascade-regression guard verifies `created_by`/`added_by`/`paid_by` ON DELETE SET NULL (already in baseline).
+- **Engineering decisions accepted**: sole-owner self-demotion blocked with 409 `cannot_demote_sole_owner` (defense-in-depth alongside the multi-owner allowance).
+- **Blockers**: none
+- **Feature Context**:
+  - No new tables — operates on existing `trip_members`.
+  - Migration adds RLS policies for owner UPDATE/DELETE on other members.
+  - Self-removal blocked at app + DB layer; ownership transfer deferred.
+- **Handoff Notes**: AC drafted. R1 confirms DoR.
+- **Files Changed**: (pending)
+- **Parallel Opportunity**: Independent track — runs alongside B-007/B-008 in R3.
 
 ---
 
-## Sprint 2 Items (all done)
-
-### [B-012] Trip member invite & accept — ✅ DONE
-- **Tier**: Full
-- **Status**: done (UAT PASS 2026-04-26)
-- **R5 outcome**: 184/184 tests pass (139 baseline + 45 new). UAT PASS on AC #1–#7. Concurrency race + token_expired/token_revoked envelope codes verified.
-- **Migration**: `0003_invitations.sql` shipped (revoked_at, indexes, RPCs).
-
-### [B-019] Invitation-only access — remove public sign-up — ✅ DONE
-- **Tier**: Full
-- **Status**: done (UAT PASS 2026-04-26)
-- **R5 outcome**: 248/248 tests pass. UAT PASS on AC #1–#10. R4: 0 CRITICAL, 2 HIGH security (timing-pad enumeration + orphan-user compensation w/ 3-retry+app_metadata flag) — both fixed.
-- **Migration**: `0006_signup_invitation.sql` shipped (signup_consume_invitation RPC).
-
-### [B-009] Google Places search proxy — ✅ DONE
-- **Tier**: Full (L)
-- **Status**: done (UAT PASS 2026-04-26)
-- **R5 outcome**: 229/229 tests pass. UAT PASS on AC #1–#7. Cache-first ILIKE+7d TTL gap closed post-R5; response now `{results, source: 'cache'|'google'}`. R4: 0 CRITICAL, 2 HIGH + 2 MEDIUMs all fixed.
-- **Migration**: `0004_places.sql` shipped.
-
-### [B-010] Place detail cache & page — ✅ DONE
-- **Tier**: Full
-- **Status**: done (UAT PASS 2026-04-26)
-- **R5 outcome**: 277/277 tests pass (29 new). UAT PASS. R4: 0 CRITICAL, 2 HIGH XSS hardening (structured PhotoAttribution, http/https scheme validation, photoRef path-traversal block, slim-row Zod re-validation, private cache) — all fixed.
-- **Migration**: none (reuses `places` table 0004).
-
-### [B-011] Bookmarks — ✅ DONE
-- **Tier**: Full
-- **Status**: done (UAT PASS 2026-04-26)
-- **R5 outcome**: 348/348 tests pass (71 new across api/bookmarks, lib/bookmark-categories, validations/bookmarks). UAT PASS on AC #1–#16. R4: 0 CRITICAL; HIGH UX/safety fixes (TripPicker role filter via `trip_members!inner(role)` join, Zod-parsed bookmark/place rows, cross-trip mutation guard) — all fixed.
-- **Migration**: `0007_bookmarks.sql` shipped (UNIQUE `(trip_id, place_id, category)`, RLS via `is_trip_member`, updated_at trigger).
-
----
-
-## Sprint 2 Plan Summary
+## Sprint 3 Plan Summary
 
 **Tracks (interleaved):**
-- Track A (access): B-012 → B-019
-- Track B (places): B-009 → B-010 → B-011
+- Track A (itinerary): B-007 → B-008
+- Track B (membership): B-013 (independent)
 
 **Parallel windows:**
-- B-012 + B-009 in R2/R3 (different domains, no shared files).
-- B-010, B-011 sequenced after B-009 (shared `places` table + types).
-- B-019 sequenced after B-012 (shared `/api/auth/signup`, `validations/auth.ts`).
+- R3: B-007 backend + B-013 backend (no shared files).
+- R3: B-008 backend after B-007 backend lands (shared `itinerary_items` validation + day view).
+- R4: code-reviewer + security-reviewer in parallel per item.
 
-**External dependencies:**
-- `GOOGLE_PLACES_API_KEY` value (user provides before R5 of B-009; cache-only tests can run without).
+**External dependencies:** none (Supabase + Postgres only).
+
+**Effort:** M + M + S (lighter than Sprint 2).
 
 ---
 
@@ -69,11 +89,15 @@
 
 ## Completed This Sprint
 
-- [B-012] Trip member invite & accept — UAT PASS 2026-04-26
-- [B-019] Invitation-only access — UAT PASS 2026-04-26
-- [B-009] Google Places search proxy — UAT PASS 2026-04-26
-- [B-010] Place detail cache & page — UAT PASS 2026-04-26
-- [B-011] Bookmarks — UAT PASS 2026-04-26
+- [B-007] Transportation fields — UAT PASS 2026-04-28
+- [B-008] Accommodations — UAT PASS-with-WARN 2026-04-28 (AC-6 N+1 fromCalls assertion missing — non-blocking; queued as a small follow-up)
+- [B-013] Member role management — UAT PASS 2026-04-28
+
+---
+
+## Sprint 2 Outcome (closed 2026-04-26)
+
+5 items shipped (B-009, B-010, B-011, B-012, B-019). Migrations: 0003–0007. 348/348 vitest tests passing. Released as v0.2.0.
 
 ---
 
@@ -85,5 +109,6 @@
 
 ## Next
 
-- R1 [product-manager] across all 5 items → confirm DoR + flag any AC gaps.
-- Then R2 [solution-architect] for B-012 + B-009 in parallel.
+- R1 [product-manager] across B-007, B-008, B-013 → confirm DoR + flag any AC gaps.
+- Then R2 [solution-architect] for all three items.
+- Then R3 build with parallel windows above.

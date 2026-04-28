@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { getSessionUser } from "@/lib/supabase/server";
 import { checkTripAccess } from "@/lib/trip-access";
 import { MembersPanel } from "@/components/members/MembersPanel";
+import { MembersList } from "@/components/members/MembersList";
 import { secondaryButtonClass } from "@/components/ui/FormField";
 
 export const metadata = { title: "Members · TravelPlanner" };
@@ -59,35 +60,23 @@ export default async function TripMembersPage({
         </div>
       </div>
 
-      {isOwner ? (
-        <MembersPanel tripId={id} />
-      ) : (
-        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-6 text-center">
-          <div
-            className="mx-auto mb-3 w-12 h-12 flex items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500"
-            aria-hidden="true"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              className="w-6 h-6"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M12 11c2.21 0 4-1.79 4-4S14.21 3 12 3 8 4.79 8 7s1.79 4 4 4zM4 21a8 8 0 0116 0"
-              />
-            </svg>
-          </div>
-          <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">
-            Only the trip owner can invite members.
-          </h2>
-          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            Ask the owner to send you an invite if you need a different role.
-          </p>
-        </div>
+      {isOwner && <MembersPanel tripId={id} />}
+
+      <section className={isOwner ? "mt-8" : undefined}>
+        <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50 mb-3">
+          Members
+        </h2>
+        <MembersList
+          tripId={id}
+          currentUserId={user.id}
+          isOwner={isOwner}
+        />
+      </section>
+
+      {!isOwner && (
+        <p className="mt-6 text-sm text-zinc-500">
+          Ask the trip owner to invite more partners or change your role.
+        </p>
       )}
     </>
   );
