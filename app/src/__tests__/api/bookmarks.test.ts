@@ -217,12 +217,12 @@ vi.mock('@/lib/supabase/server', () => ({
 }));
 
 // ---- Import routes AFTER mocks ----
-import { POST as POST_LIST, GET as GET_LIST } from '@/app/api/trips/[tripId]/bookmarks/route';
-import { PATCH, DELETE } from '@/app/api/trips/[tripId]/bookmarks/[id]/route';
+import { POST as POST_LIST, GET as GET_LIST } from '@/app/api/trips/[id]/bookmarks/route';
+import { PATCH, DELETE } from '@/app/api/trips/[id]/bookmarks/[bookmarkId]/route';
 
-const tripCtx = { params: Promise.resolve({ tripId: FIXED_TRIP_ID }) };
+const tripCtx = { params: Promise.resolve({ id: FIXED_TRIP_ID }) };
 const bookmarkCtx = {
-  params: Promise.resolve({ tripId: FIXED_TRIP_ID, id: FIXED_BOOKMARK_ID }),
+  params: Promise.resolve({ id: FIXED_TRIP_ID, bookmarkId: FIXED_BOOKMARK_ID }),
 };
 
 function postReq(body: unknown): NextRequest {
@@ -443,7 +443,7 @@ describe('POST /api/trips/[tripId]/bookmarks', () => {
   it('rejects malformed tripId in URL with 404', async () => {
     const res = await POST_LIST(
       postReq({ google_place_id: 'gpid' }),
-      { params: Promise.resolve({ tripId: 'not-a-uuid' }) },
+      { params: Promise.resolve({ id: 'not-a-uuid' }) },
     );
     expect(res.status).toBe(404);
   });

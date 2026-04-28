@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "import:trello": "tsx scripts/import-trello.ts"
+    "import:trello": "tsx scripts/import-trello.ts",
+    "enrich:bookmarks": "tsx scripts/enrich-bookmarks.ts"
   },
   "dependencies": {
     "@supabase/auth-helpers-nextjs": "^0.15.0",

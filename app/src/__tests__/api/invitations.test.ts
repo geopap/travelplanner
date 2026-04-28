@@ -185,7 +185,7 @@ vi.mock('@/lib/supabase/server', () => ({
 import {
   POST as InvitationsCreatePOST,
   GET as InvitationsListGET,
-} from '@/app/api/trips/[tripId]/invitations/route';
+} from '@/app/api/trips/[id]/invitations/route';
 import { GET as InvitationsLookupGET } from '@/app/api/invitations/[token]/route';
 import { POST as InvitationsAcceptPOST } from '@/app/api/invitations/[token]/accept/route';
 
@@ -226,7 +226,7 @@ function acceptReq(): NextRequest {
 }
 
 const tripCtx = (tripId = FIXED_TRIP_ID) => ({
-  params: Promise.resolve({ tripId }),
+  params: Promise.resolve({ id: tripId }),
 });
 const tokenCtx = (token = 'some-token') => ({
   params: Promise.resolve({ token }),
