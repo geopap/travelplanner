@@ -34,7 +34,11 @@ export type AuditAction =
   | 'accommodation_deleted'
   | 'member_role_updated'
   | 'member_removed'
-  | 'member_left';
+  | 'member_left'
+  | 'profile.update'
+  | 'expense.create'
+  | 'expense.update'
+  | 'expense.delete';
 
 export interface AuditParams {
   actorId: string | null;

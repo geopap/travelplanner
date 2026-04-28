@@ -18,6 +18,7 @@ import { SkeletonCard } from "@/components/Skeletons";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { TransportSummary } from "@/components/trip-overview/TransportSummary";
 import { AccommodationsSummary } from "@/components/accommodations/AccommodationsSummary";
+import { ExpensesSummary } from "@/components/expenses/ExpensesSummary";
 import {
   dangerButtonClass,
   primaryButtonClass,
@@ -183,6 +184,12 @@ export function TripOverview({ tripId }: TripOverviewProps) {
           >
             Open itinerary
           </Link>
+          <Link
+            href={`/trips/${trip.id}/budget`}
+            className={secondaryButtonClass}
+          >
+            Budget
+          </Link>
           {canEdit && (
             <Link
               href={`/trips/${trip.id}/edit`}
@@ -221,6 +228,13 @@ export function TripOverview({ tripId }: TripOverviewProps) {
           }
         />
       </dl>
+
+      <ExpensesSummary
+        tripId={trip.id}
+        totalBudget={trip.total_budget}
+        tripBaseCurrency={trip.base_currency}
+        variant="compact"
+      />
 
       <TransportSummary tripId={trip.id} canEdit={canEdit} />
 

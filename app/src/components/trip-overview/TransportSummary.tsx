@@ -47,6 +47,11 @@ const MODE_META: Record<
     label: "Ferry",
     tone: "bg-blue-100 text-blue-800 dark:bg-blue-950/50 dark:text-blue-300",
   },
+  other: {
+    icon: "🧭",
+    label: "Other",
+    tone: "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200",
+  },
 };
 
 export function TransportSummary({ tripId, canEdit }: TransportSummaryProps) {

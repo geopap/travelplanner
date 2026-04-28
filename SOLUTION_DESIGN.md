@@ -466,30 +466,78 @@ create policy bookmarks_delete on public.bookmarks
   for delete using (public.is_trip_member(trip_id, 'editor'));
 ```
 
-### 2.11 `expenses`
+### 2.11 `expenses` — REFINED Sprint 4 R2 (B-014)
+
+Migration: `app/supabase/migrations/0012_expenses.sql` (rollback: `0012_expenses_rollback.sql`).
+`trips.total_budget` already exists in baseline `0001_init.sql` (numeric(14,2), nullable, in `trips.base_currency`) — no separate migration required.
+
+**Refinements vs Sprint-0 draft:**
+- `description` is now `not null` (per AC-2; required form field).
+- `amount` is now strictly positive (`> 0`, not `>= 0`) — refunds/credits out of v1 scope.
+- `occurred_at` changed from `timestamptz` to `date` — AC-2 specifies a calendar date that must fall inside `trips.start_date..end_date` (also `date`). No time-of-day need for v1.
+- Added `created_by` column (parallel to accommodations pattern §2.9; supports audit & "added by" UI).
+- Added shape CHECK on `split_among` (must be a JSON array with ≥ 1 element).
+- Replaced legacy `expenses_occurred_idx` with `(trip_id, occurred_at desc)` to back the descending list query (AC-7).
+- Added a per-trip date-range trigger (mirrors `tg_accommodation_within_trip` in 0009) — defense-in-depth for AC-5; API still validates first to return clean 400s.
+- `day_id` retained as nullable convenience column (joinable to `trip_days`); not required by AC. Indexed (partial).
 
 ```sql
 create table public.expenses (
   id           uuid primary key default gen_random_uuid(),
   trip_id      uuid not null references public.trips(id) on delete cascade,
   day_id       uuid references public.trip_days(id) on delete set null,
-  category     text not null,
-  description  text,
-  amount       numeric(14,2) not null check (amount >= 0),
+  category     text not null check (category in (
+                 'accommodation','transport','food','activities','shopping','other'
+               )),
+  description  text not null check (char_length(description) between 1 and 500),
+  amount       numeric(12,2) not null check (amount > 0),
   currency     char(3) not null check (currency ~ '^[A-Z]{3}$'),
-  paid_by      uuid references auth.users(id) on delete set null,
-  split_among  jsonb not null default '[]'::jsonb,   -- [{ user_id, share_pct }, …]
-  receipt_url  text,
-  occurred_at  timestamptz not null default now(),
+  occurred_at  date not null,
+  paid_by      uuid not null references auth.users(id) on delete set null,
+  split_among  jsonb not null,
+  created_by   uuid references auth.users(id) on delete set null,
   created_at   timestamptz not null default now(),
-  updated_at   timestamptz not null default now()
+  updated_at   timestamptz not null default now(),
+  constraint expenses_split_among_shape
+    check (
+      jsonb_typeof(split_among) = 'array'
+      and jsonb_array_length(split_among) >= 1
+    )
 );
-create index expenses_trip_idx    on public.expenses (trip_id);
-create index expenses_day_idx     on public.expenses (day_id);
-create index expenses_occurred_idx on public.expenses (trip_id, occurred_at);
+
+create index expenses_trip_occurred_idx on public.expenses (trip_id, occurred_at desc);
+create index expenses_day_idx           on public.expenses (day_id) where day_id is not null;
+create index expenses_paid_by_idx       on public.expenses (trip_id, paid_by);
+
 create trigger expenses_set_updated_at
   before update on public.expenses
   for each row execute function public.tg_set_updated_at();
+
+-- Per-trip date-range trigger (defense-in-depth; mirrors 0009 accommodations)
+create or replace function public.tg_expense_within_trip()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare s date; e date;
+begin
+  select start_date, end_date into s, e from public.trips where id = new.trip_id;
+  if s is null then
+    raise exception 'trip_not_found' using errcode = 'P0002';
+  end if;
+  if new.occurred_at < s or new.occurred_at > e then
+    raise exception 'occurred_at_out_of_range'
+      using errcode = '23514',
+            detail  = format('occurred_at %s outside trip range %s..%s',
+                             new.occurred_at, s, e);
+  end if;
+  return new;
+end
+$$;
+create trigger expenses_within_trip
+  before insert or update on public.expenses
+  for each row execute function public.tg_expense_within_trip();
 
 alter table public.expenses enable row level security;
 
@@ -502,6 +550,77 @@ create policy expenses_update on public.expenses
 create policy expenses_delete on public.expenses
   for delete using (public.is_trip_member(trip_id, 'editor'));
 ```
+
+**`split_among` shape (API-validated, not DB-enforced):**
+
+```json
+[ { "user_id": "uuid", "share_pct": 50 }, { "user_id": "uuid", "share_pct": 50 } ]
+```
+
+API rules (validated in `app/src/lib/validations/expense.ts`):
+1. Each `user_id` must be a current accepted member of the trip.
+2. `user_id` values are unique within the array.
+3. `share_pct` values sum to exactly `100` (allow ±0.01 tolerance for rounding) — for v1 EQUAL split (AC-3) all shares are `100 / count`.
+4. `paid_by` must also be a current accepted member of the trip.
+5. `currency` must equal `trips.base_currency` (AC-2; multi-currency deferred to Phase B).
+
+A DB CHECK that sums `share_pct` across array elements would require a cumbersome LATERAL — over-complex for v1. The trigger above already enforces the date constraint; per-share validation lives at the API layer where errors are user-friendly.
+
+**Net balance — `get_trip_balances` SQL function**
+
+To avoid N+1 (one query per member) the balance computation lives in a single SQL function called by `GET /api/trips/[id]/balances` and embedded in the trip overview when needed.
+
+```sql
+create or replace function public.get_trip_balances(p_trip_id uuid)
+returns table (
+  user_id   uuid,
+  paid      numeric(14,2),
+  owes      numeric(14,2),
+  net       numeric(14,2)
+)
+language sql
+stable
+security invoker
+set search_path = public
+as $$
+  with members as (
+    select user_id
+    from public.trip_members
+    where trip_id = p_trip_id and accepted_at is not null
+  ),
+  paid_per_member as (
+    select e.paid_by as user_id, coalesce(sum(e.amount), 0) as paid
+    from public.expenses e
+    where e.trip_id = p_trip_id
+    group by e.paid_by
+  ),
+  -- Unnest split_among once; share_amount = amount * share_pct / 100.
+  shares as (
+    select
+      (s->>'user_id')::uuid                                     as user_id,
+      sum(e.amount * ((s->>'share_pct')::numeric) / 100.0)      as owes
+    from public.expenses e
+    cross join lateral jsonb_array_elements(e.split_among) s
+    where e.trip_id = p_trip_id
+    group by (s->>'user_id')::uuid
+  )
+  select
+    m.user_id,
+    coalesce(p.paid, 0)::numeric(14,2)                  as paid,
+    coalesce(sh.owes, 0)::numeric(14,2)                 as owes,
+    (coalesce(p.paid, 0) - coalesce(sh.owes, 0))::numeric(14,2) as net
+  from members m
+  left join paid_per_member p on p.user_id = m.user_id
+  left join shares          sh on sh.user_id = m.user_id;
+$$;
+-- Restrict execution: function is `security invoker`, so the caller's RLS on
+-- `trip_members` and `expenses` controls visibility. Non-members see no rows
+-- (RLS denies the underlying selects).
+revoke all on function public.get_trip_balances(uuid) from public;
+grant execute on function public.get_trip_balances(uuid) to authenticated;
+```
+
+The API route joins this output with `profiles` (single batched query: `select profiles.id, full_name, email from profiles where id in (...)`) and returns `[{ user_id, full_name, email, paid, owes, net }]` sorted by `net desc`. **One DB round-trip for balances + one for profile names — no N+1.**
 
 ### 2.12 `audit_log` (mutations across all trip-scoped tables)
 
@@ -682,16 +801,61 @@ export const ItineraryItemCreate = z.object({
 
 POST resolves `google_place_id → places.id` by hitting the cache (or cold-calling Place Details) before inserting.
 
-### 4.9 Expenses
+### 4.9 Expenses — REFINED Sprint 4 R2 (B-014)
 
 | Method | Path | Role | Request | Response | Errors |
 |---|---|---|---|---|---|
-| GET | `/api/trips/[id]/expenses` | viewer+ | `page`, `limit`, optional `from`, `to`, `category` | `{ items, total, totals: { by_currency: Record<string,number>, by_category: Record<string,number> } }` | 401, 404 |
-| POST | `/api/trips/[id]/expenses` | editor+ | `ExpenseCreate` | `201 { expense }` | 400, 403, 404 |
-| PATCH | `/api/trips/[id]/expenses/[id]` | editor+ | partial | `{ expense }` | 400, 403, 404 |
-| DELETE | `/api/trips/[id]/expenses/[id]` | editor+ | — | `204` | 403, 404 |
+| GET | `/api/trips/[id]/expenses` | viewer+ | `page` (default 1), `limit` (default 20, max 100), optional `category`, optional `paid_by` | `{ data: Expense[], page, limit, total, total_spent }` | 401, 403, 404 |
+| GET | `/api/trips/[id]/expenses/[expenseId]` | viewer+ | — | `{ expense: Expense }` | 401, 403, 404 |
+| POST | `/api/trips/[id]/expenses` | editor+ | `ExpenseCreate` | `201 { expense: Expense }` | 400, 401, 403, 404 |
+| PATCH | `/api/trips/[id]/expenses/[expenseId]` | editor+ | partial `ExpenseCreate` | `{ expense: Expense }` | 400, 401, 403, 404 |
+| DELETE | `/api/trips/[id]/expenses/[expenseId]` | editor+ | — | `204` | 401, 403, 404 |
+| GET | `/api/trips/[id]/balances` | viewer+ | — | `{ balances: Balance[] }` (sorted by `net desc`) | 401, 403, 404 |
 
-Totals query is date-bounded (required `from`/`to` when `totals=true` param is set) — **R2 Q-4**.
+**`Expense` response shape:**
+```ts
+{
+  id: string; trip_id: string; category: ExpenseCategory; description: string;
+  amount: number; currency: string; occurred_at: string /* yyyy-mm-dd */;
+  paid_by: string; paid_by_profile: { id: string; full_name: string | null; email: string };
+  split_among: { user_id: string; share_pct: number }[];
+  created_by: string | null; created_at: string; updated_at: string;
+}
+```
+
+**`Balance` response shape:**
+```ts
+{ user_id: string; full_name: string | null; email: string;
+  paid: number; owes: number; net: number; }
+```
+
+**`ExpenseCreate` (POST body):**
+```ts
+{
+  category: 'accommodation'|'transport'|'food'|'activities'|'shopping'|'other';
+  description: string;            // 1..500 chars
+  amount: number;                 // > 0, max 2 decimals
+  currency: string;               // ISO 4217 — must equal trip.base_currency
+  occurred_at: string;            // yyyy-mm-dd, within trip date range
+  paid_by: string;                // accepted trip member uuid
+  split_among: { user_id: string; share_pct: number }[];  // see §2.11 rules
+}
+```
+
+**Server-side validation (POST/PATCH) — every request:**
+1. `is_trip_member(trip_id, 'editor')` (defense-in-depth, in addition to RLS).
+2. `currency === trip.base_currency` → 400 `currency_must_match_base`.
+3. `occurred_at` within `[trip.start_date, trip.end_date]` → 400 `date_out_of_range`. (DB trigger is the safety net.)
+4. `paid_by` and every `split_among[].user_id` are accepted members of the trip — single query: `select user_id from trip_members where trip_id=$1 and accepted_at is not null and user_id = any($2::uuid[])`.
+5. `split_among[].user_id` values unique; `share_pct` values sum to 100 ± 0.01.
+6. `trip_id` always derived from URL — never read from request body.
+7. Audit log row written via `logAudit('expense.create'|'expense.update'|'expense.delete', ...)` after success.
+
+**List query — `GET /api/trips/[id]/expenses`** uses `expenses_trip_occurred_idx` (single ordered scan); joins `profiles` for `paid_by_profile` in one query (`.select('*, paid_by_profile:profiles!paid_by(id, full_name, email)')`). `total_spent` is a separate cheap aggregate `sum(amount)` over the trip (no pagination on it). No N+1.
+
+**Balances query** — single RPC `supabase.rpc('get_trip_balances', { p_trip_id })` + single `profiles` lookup (`in` filter). RLS enforces visibility.
+
+**Rationale — no DB cross-table currency check:** `expenses.currency` could be enforced equal to `trips.base_currency` via a trigger, but for v1 only `base_currency` is accepted by the API and refactoring around multi-currency in Phase B will naturally remove this constraint. API-layer validation is sufficient and yields cleaner errors.
 
 ### 4.10 Places proxy
 
@@ -2139,6 +2303,256 @@ Sequencing: B-007 backend lands its shared edits FIRST (largest delta — itiner
 - Ownership-transfer UX flow (separate backlog item).
 - Realtime member-eviction push (Supabase Realtime); lazy-on-next-call eviction is acceptable for v1.
 - Pending-invitation surface on Members tab (B-013 AC-10 explicitly excludes it).
+
+---
+
+## Sprint 4 — R2 Architecture Additions
+
+### B-017 — Profile / Avatars (Fast Track, light R2 on Storage policy)
+
+Auth-adjacent: a user must not be able to overwrite or delete another user's avatar. Storage RLS is the sole enforcement point.
+
+**Bucket** (created via migration `app/supabase/migrations/0013_avatars_storage.sql`; slots 0011 = B-016 `source_card_id`, 0012 = B-014 expenses, 0013 = avatars storage, 0014 = post-R4 expense fixes):
+```sql
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'avatars', 'avatars', true, 2097152,
+  array['image/jpeg','image/png','image/webp']
+);
+```
+- `public=true` → unauthenticated GET via public URL (avatars render in member lists without signed URLs).
+- `file_size_limit=2097152` → 2 MB hard cap, enforced by Storage layer.
+- `allowed_mime_types` → Storage rejects any other content-type at upload time. This **is** the server-side MIME re-validation required by AC-3 (no app-layer MIME sniffing needed).
+
+**Path convention:** `{user_id}/avatar.<ext>` (single object per user). `storage.foldername(name)[1]` resolves to the `user_id` segment.
+
+**Storage RLS** on `storage.objects` for `bucket_id = 'avatars'`:
+```sql
+create policy avatars_select_public on storage.objects
+  for select using (bucket_id = 'avatars');
+create policy avatars_insert_own on storage.objects
+  for insert with check (
+    bucket_id = 'avatars' and auth.uid()::text = (storage.foldername(name))[1]
+  );
+create policy avatars_update_own on storage.objects
+  for update using (
+    bucket_id = 'avatars' and auth.uid()::text = (storage.foldername(name))[1]
+  );
+create policy avatars_delete_own on storage.objects
+  for delete using (
+    bucket_id = 'avatars' and auth.uid()::text = (storage.foldername(name))[1]
+  );
+```
+
+**Replace pattern (canonical, client-side):** before uploading a new avatar, the client calls `supabase.storage.from('avatars').remove([oldPath])` if `profiles.avatar_url` is non-null; then upload new object → PATCH `profiles.avatar_url`. Keeps storage clean (AC-4) and stays within RLS (caller can only touch their own folder).
+
+**Delete pattern (AC-6):** client calls `remove([currentPath])` then `PATCH /api/profile { avatar_url: null }`. UI renders an initials avatar component thereafter (no server work).
+
+**Profile API contract (new, B-017):**
+- `PATCH /api/profile` — auth required. Body (Zod): `{ full_name?: string (1..80, trimmed) | null, avatar_url?: string (https URL, ≤ 1024 chars) | null }`. Updates `public.profiles` for `id = auth.uid()` only. Returns `{ id, full_name, avatar_url, updated_at }`. Audit log: `profile.update`.
+- Avatar bytes do NOT pass through the API — client uploads directly to Storage; only the resulting public URL is PATCHed.
+
+**Rollback** (`*_rollback.sql`): drop the four policies, then `delete from storage.buckets where id = 'avatars'`.
+
+**Open issues for R3:** none architectural. Final migration number landed as `0013_avatars_storage.sql`.
+
+---
+
+### B-016 — Trello import (one-shot script)
+
+This subsection locks the schema delta, label-routing rules, hotel pairing logic, atomicity model, and operational guardrails for `app/scripts/import-trello.ts` — the one-shot importer that hydrates the Japan 2026 trip from `app/scripts/data/japan-2026.json` (copied from `onboarding/fWkLqBPa - japan-2026.json` at R3).
+
+#### B-016.1 Schema delta — migration `0011_trello_import.sql`
+
+Three table-shape changes plus one constraint relaxation. All ride a single transaction, with a sibling `0011_trello_import_rollback.sql`.
+
+**1. Add `source_card_id text` to three tables (nullable).**
+
+```sql
+alter table public.itinerary_items add column source_card_id text;
+alter table public.accommodations  add column source_card_id text;
+alter table public.bookmarks       add column source_card_id text;
+```
+
+`source_card_id` stores the Trello `cards[].id` (24-hex string). Null for any row not created via the importer. UI-created rows leave it null.
+
+**2. Per-table unique partial index (idempotency key).**
+
+```sql
+create unique index itinerary_items_trip_source_card_uniq
+  on public.itinerary_items (trip_id, source_card_id)
+  where source_card_id is not null;
+
+create unique index accommodations_trip_source_card_uniq
+  on public.accommodations (trip_id, source_card_id)
+  where source_card_id is not null;
+
+create unique index bookmarks_trip_source_card_uniq
+  on public.bookmarks (trip_id, source_card_id)
+  where source_card_id is not null;
+```
+
+`(trip_id, source_card_id)` is the upsert conflict target. Re-running the importer never duplicates rows. Trello cards reused across trips remain unique per trip.
+
+**3. Relax `bookmarks.place_id` to nullable + add row-level guard.**
+
+`0007_bookmarks.sql` declares `place_id uuid not null references public.places(id)`. The importer must be allowed to create bookmark rows without a Place (no Google Places API call from the script). Migration:
+
+```sql
+alter table public.bookmarks alter column place_id drop not null;
+
+alter table public.bookmarks
+  add constraint bookmarks_place_or_source_card
+  check (place_id is not null or source_card_id is not null);
+```
+
+The CHECK preserves the Sprint-2 invariant for UI-created bookmarks (which never set `source_card_id` and so still must carry a `place_id`). Importer rows may have null `place_id`, but only when `source_card_id` is set.
+
+The existing `unique (trip_id, place_id, category)` constraint must be replaced with a partial unique index — Postgres treats nulls as distinct, so the constraint becomes meaningless against importer rows but the UI-row uniqueness must still hold:
+
+```sql
+alter table public.bookmarks drop constraint bookmarks_trip_id_place_id_category_key;
+
+create unique index bookmarks_trip_place_category_uniq
+  on public.bookmarks (trip_id, place_id, category)
+  where place_id is not null;
+```
+
+The `bookmarks_trip_source_card_uniq` index handles dedup for importer rows.
+
+**4. RLS posture.** `source_card_id` is just a column — RLS is unchanged. Service-role bypass means the script writes through; the new CHECK still runs. The existing `bookmarks_insert` policy enforces `added_by = auth.uid()`; service-role bypasses RLS, so the importer sets `added_by = <owner-user-id>` for audit cleanliness.
+
+**Rollback (`0011_trello_import_rollback.sql`):**
+
+```sql
+begin;
+-- restore bookmarks unique constraint and place_id NOT NULL
+drop index if exists public.bookmarks_trip_place_category_uniq;
+alter table public.bookmarks drop constraint if exists bookmarks_place_or_source_card;
+-- (NOTE: re-asserting place_id NOT NULL will fail if importer rows exist with null place_id;
+--  rollback assumes the importer-created data has been deleted first.)
+alter table public.bookmarks alter column place_id set not null;
+alter table public.bookmarks
+  add constraint bookmarks_trip_id_place_id_category_key
+  unique (trip_id, place_id, category);
+-- drop source_card_id columns + indexes
+drop index if exists public.bookmarks_trip_source_card_uniq;
+drop index if exists public.accommodations_trip_source_card_uniq;
+drop index if exists public.itinerary_items_trip_source_card_uniq;
+alter table public.bookmarks       drop column if exists source_card_id;
+alter table public.accommodations  drop column if exists source_card_id;
+alter table public.itinerary_items drop column if exists source_card_id;
+commit;
+```
+
+The rollback's docstring must call out the prerequisite: delete importer rows first (`delete from <table> where source_card_id is not null and trip_id = '<japan-trip-uuid>'`), or `set not null` on `bookmarks.place_id` will fail.
+
+#### B-016.2 Updated table baselines
+
+§2.7 `itinerary_items`, §2.9 `accommodations`, §2.10 `bookmarks` each gain:
+
+```
+source_card_id text   -- Trello card id; null for non-imported rows; unique per trip when set
+```
+
+§2.10 `bookmarks` further changes: `place_id uuid` (now nullable), with CHECK `(place_id is not null or source_card_id is not null)`, and the unique key replaced with the partial index `bookmarks_trip_place_category_uniq` (UI-row scope) plus `bookmarks_trip_source_card_uniq` (importer scope).
+
+#### B-016.3 Day mapping — script must create `trip_days` explicitly
+
+**Correction to the R1 handoff note in SPRINT.md:** there is no automatic `trip_days` creation trigger. `0001_init.sql` ships only `tg_seed_owner_member` on `trips`. The importer therefore:
+
+1. Creates the `trips` row (`base_currency='CHF'`, `start_date=2026-11-13`, `end_date=2026-12-08`, `created_by=<owner-uuid>`, `name='Japan 2026'`) — idempotent on `(created_by, name='Japan 2026')`.
+2. Generates `trip_days` rows for every date in `[start_date, end_date]` via `insert ... select generate_series(...) on conflict (trip_id, date) do nothing`. Existing `unique (trip_id, date)` makes this safe to re-run.
+3. Builds an in-memory `Map<DD.MM.YYYY, trip_day_id>` from `select id, date from trip_days where trip_id = $1`.
+4. Routes each card to its list's date and looks up `day_id` from the map.
+
+#### B-016.4 Card-type → table routing
+
+Trello label drives table selection. Exactly one label per card is expected; multi-label cards log a warning and use the first label.
+
+| Trello label             | Target table(s)                                    | Notes |
+|--------------------------|-----------------------------------------------------|-------|
+| `Transportation`         | `itinerary_items` (type=`transport`) **+** `transportation` | Mode best-effort from card-name keywords: `/flight\|fly/i`→`flight`, `/train\|shinkansen/i`→`train`, `/bus/i`→`bus`, `/ferry/i`→`ferry`, `/car\|drive/i`→`car`, else `flight` (default chosen by frequency in seed). `cost`, `carrier`, `from_location`, `to_location` left null — Trello has none. `itinerary_items.title` = card name; `transportation` row is the structured sibling. Both rows carry `source_card_id`; script writes `itinerary_items` first, then `transportation`. **Note:** there is no FK between them today — they share `source_card_id` as the linkage. |
+| `Hotels`                 | `accommodations` (one row per Checkin/Checkout pair) | See B-016.5 pairing rule. The Checkin card's id is used as the row's `source_card_id` (canonical). |
+| `Restaurants`            | `bookmarks` (category=`restaurant`)                 | `place_id` null; `notes` from `cards[].desc` if present (truncated to 500 chars). |
+| `Museums`                | `bookmarks` (category=`museum`)                     | as above |
+| `Attractions`            | `bookmarks` (category=`sight`)                      | as above |
+| `Shopping`               | `bookmarks` (category=`shopping`)                   | as above |
+| (none / unrecognized)    | `itinerary_items` (type=`note`)                     | Card name → `title`; `desc` → `notes`. Logged as `unlabeled` for visibility. |
+
+Card description (`cards[].desc`) is copied to `notes` on the target row when non-empty, truncated to the column's max length (4000 for `accommodations.notes`, 500 for `bookmarks.notes`, no explicit cap for `itinerary_items.notes`).
+
+#### B-016.5 Hotel pairing algorithm
+
+Hotel cards follow `Checkin - <Hotel Name>` / `Checkout - <Hotel Name>` in their card `name`. Pairing:
+
+1. Iterate all `Hotels`-labeled cards. Strip case-insensitive `^(Checkin|Checkout)\s*-\s*` prefix; trim, collapse whitespace → canonical hotel name.
+2. Group by canonical name. Within each group:
+   - **One Checkin + one Checkout** → emit one `accommodations` row: `hotel_name=<canonical>`, `check_in_date=<list date of Checkin>`, `check_out_date=<list date of Checkout>`, `source_card_id=<Checkin card id>`.
+   - **Checkin only (no matching Checkout)** → emit row with `check_out_date = check_in_date + 1 day`, log `WARN unpaired_checkin name=<...>`.
+   - **Checkout only (no matching Checkin)** → log `ERROR unpaired_checkout name=<...>`, skip. No partial row.
+   - **Multiple Checkins for one name** → emit one row per Checkin, pair each with the chronologically-next Checkout for that name; remaining unpaired Checkins fall through to the +1-day default. Log `WARN multi_checkin name=<...> count=<n>`.
+3. The `accommodations_within_trip` trigger (from `0009_accommodations.sql`) still applies — any inferred `check_out_date` must lie inside the trip range; otherwise the insert fails and the script logs the offending pair and continues.
+
+#### B-016.6 Atomicity model — per-card transaction (resilient)
+
+**Decision: option (b) — per-card upsert, each as its own write.** Rationale: a one-shot script with 165 cards has no real lock risk, but a single bad card aborting after 100 successful writes is a realistic failure mode. Per-card upsert lets the script log + skip the offender and continue; re-running upserts the rest idempotently.
+
+Implementation pattern (Supabase JS client, service role):
+
+```ts
+for (const card of cards) {
+  try {
+    await supabase.from(table).upsert(row, {
+      onConflict: 'trip_id,source_card_id',
+      ignoreDuplicates: false,  // we want the row updated if Trello desc/name changed
+    });
+  } catch (e) {
+    logger.error({ cardId: card.id, label, err: e.message }, 'card_skipped');
+    summary.errors.push({ cardId: card.id, reason: e.message });
+  }
+}
+```
+
+Hotel pairs upsert as one row keyed on the Checkin's `source_card_id`; if upsert fails, only that pair is skipped.
+
+The trip row uses idempotency key `(created_by, name='Japan 2026')`. If found, reuse `id`; otherwise insert. The script never deletes — re-runs only insert/update.
+
+**Dry-run (`--dry-run`)**: the script computes the full plan (hotel pairs + label routing) and logs the planned writes (target table, source_card_id, key fields) without invoking `.upsert()`. Exit code 0 on success.
+
+**Run summary**: at end of run print `created/updated/skipped/errors` counts per table plus the unpaired-hotel and unlabeled-card lists.
+
+#### B-016.7 Service-role key handling
+
+Script reads `SUPABASE_SERVICE_ROLE_KEY` from `app/.env.local` via `dotenv` (server-only). `app/.env.example` gains:
+
+```
+# Server-only. NEVER commit. Used by app/scripts/import-trello.ts (and any future maintenance scripts).
+# RLS is bypassed by this key — only run scripts whose code you have read end-to-end.
+SUPABASE_SERVICE_ROLE_KEY=
+```
+
+Script aborts with a clear error if the var is missing or appears to be the anon key (length / prefix heuristic). Also requires `NEXT_PUBLIC_SUPABASE_URL` (already in `.env.example`).
+
+#### B-016.8 R2 Query-Performance Checklist
+
+| # | Check | Status |
+|---|-------|--------|
+| Q-1 | List queries bounded | YES — point reads via `(trip_id, source_card_id)` partial unique index. The single bulk read is `select id, date from trip_days where trip_id = $1` (≤ 26 rows, indexed). |
+| Q-2 | No N+1 | ACCEPTED — N upserts is intrinsic to a bulk seeder. No read-then-write loops; upserts decide insert-vs-update server-side. Documented as one-shot, not user-facing. |
+| Q-3 | Pagination on list endpoints | N/A — script, not API route. |
+| Q-4 | Date-bounded analytics | N/A. |
+
+#### B-016.9 API surface
+
+**No new API routes.** Existing routes (itinerary, transportation, accommodations, bookmarks) read/write `source_card_id` transparently — readers ignore it; UI writers never set it. Inbound Zod validations (`app/src/lib/validations/*`) explicitly `.omit({ source_card_id: true })` (or simply never declare it on the create schema) so client-supplied values are stripped. Internal row-level types used by the importer carry an optional `source_card_id?: string`.
+
+#### B-016.10 Open issues for [backend-engineer] R3
+
+1. **Mode default for Transportation cards** — B-016.4 picks `flight` as fallback. Confirm acceptable, or restrict `flight` to cases where the card name contains an airport code, else log + skip the `transportation` row (still create the `itinerary_items` row). Pick at R3 start.
+2. **`itinerary_items.start_time`** — Trello cards have no time; importer leaves `start_time`/`end_time` null. Verify Sprint-1 day view renders null-time items.
+3. **Trip currency** — script hard-codes `base_currency='CHF'` per R1 handoff. Document in script README.
+4. **Audit log** — service-role bypasses RLS but any audit-log triggers still fire. Confirm there is no per-request `auth.uid()` requirement; if there is, the script either sets `request.jwt.claim.sub` via `set_config` or writes audit rows manually with `actor_id = <owner-uuid>`.
 
 ---
 

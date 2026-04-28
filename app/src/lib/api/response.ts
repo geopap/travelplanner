@@ -37,7 +37,11 @@ export type ApiErrorCode =
   | 'cannot_demote_sole_owner'
   | 'owner_self_delete_forbidden'
   | 'not_a_member'
-  | 'member_not_found';
+  | 'member_not_found'
+  | 'invalid_currency'
+  | 'date_out_of_range'
+  | 'member_not_in_trip'
+  | 'share_pct_invalid';
 
 export type ApiErrorDetails = Record<string, unknown>;
 

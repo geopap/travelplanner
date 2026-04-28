@@ -164,6 +164,28 @@ Before R1 of the first item:
 1. Gate 4 — [scrum-master] verifies release checklist
 2. RELEASE — [release-manager] executes release (version, notes, PR, tag, deploy)
 3. ARCHIVE — [scrum-master] archives to SPRINT_ARCHIVE.md
+4. MIGRATION NOTICE — [scrum-master] surfaces a clear, prominent "Migrations to apply" list
+```
+
+### Migration Notice (mandatory at every sprint close)
+
+After release and archive, the [scrum-master] **must** post a final user-facing notice listing every new migration shipped in the sprint, in numeric apply order, with a one-line purpose per migration. Phrase as a TODO for the user, not a passive note. Do this even if the sprint shipped only one migration. Suggest a `select tablename from pg_tables where schemaname='public'` sanity check so the user can confirm prior-sprint migrations were also applied.
+
+Template:
+
+```
+## Migrations to apply (run before using the new build)
+
+Apply these to Supabase in order (CLI `supabase db push` or paste into Studio SQL Editor):
+
+1. `app/supabase/migrations/000X_<name>.sql` — <one-line purpose>
+2. `app/supabase/migrations/000Y_<name>.sql` — <one-line purpose>
+
+Sanity check (run after applying):
+- `select tablename from pg_tables where schemaname='public' order by tablename;` — expected new tables: <list>
+- Expected new RPCs/functions: <list>
+
+Rollbacks live next to each migration as `*_rollback.sql`.
 ```
 
 ### Definition of Done

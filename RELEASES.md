@@ -4,6 +4,33 @@ Local reference copy. Source of truth: GitHub Releases.
 
 ---
 
+## v0.4.0 — Sprint 4: Money, Profiles, Japan import (2026-04-28)
+
+Sprint 4 adds per-trip expense tracking with per-member balance computation, a full profile management page with avatar upload, and a one-shot Trello import script that seeds the 26-day Japan 2026 trip.
+
+### Highlights
+- **B-014 Budget & expenses** — New `expenses` table (trip-scoped, role-gated). 6 endpoints: `POST/GET /api/trips/[id]/expenses` (paginated), `GET/PATCH/DELETE /api/trips/[id]/expenses/[expenseId]`, `GET /api/trips/[id]/expenses/balances`. Per-member balance computation via `get_trip_balances` RPC. `get_trip_expense_total` RPC for budget overview widget. All mutations audit-logged. Viewer role read-only enforced at RLS + app layer.
+- **B-016 Japan 2026 Trello import script** — One-shot importer at `app/scripts/import-trello.ts`. Supports `--dry-run` mode; idempotent via `source_card_id` column on items/accommodations/bookmarks. Migrates checklist items as itinerary sub-items, attachments as notes, labels as categories. Covers the full 26-day Japan trip from a Trello export JSON.
+- **B-017 Profile management** — `/settings/profile` page with display name + bio editing, avatar upload/replace/delete via Supabase Storage (`avatars` bucket). `PATCH /api/profile` endpoint. Member lists across all trip views now render avatar thumbnails with initials fallback.
+
+### Database
+- Migration `0011_trello_import.sql`: `source_card_id` column on `itinerary_items`, `accommodations`, `bookmarks`; relaxes `bookmarks.place_id` NOT NULL; widens `transportation.mode` CHECK to include `other`. Rollback: `0011_trello_import_rollback.sql`.
+- Migration `0012_expenses.sql`: `expenses` table + RLS + `tg_expense_within_trip` trigger (date-range guard) + `get_trip_balances` RPC. Rollback: `0012_expenses_rollback.sql`.
+- Migration `0013_avatars_storage.sql`: `avatars` Storage bucket + 4 RLS policies on `storage.objects` (owner upload/replace/delete; member read). Rollback: `0013_avatars_storage_rollback.sql`.
+- Migration `0014_expense_review_fixes.sql`: `get_trip_expense_total` RPC + tightened `expenses_update` policy `WITH CHECK`. Rollback: `0014_expense_review_fixes_rollback.sql`.
+
+### Quality
+- 584/584 vitest tests passing (+116 new this sprint).
+- 0 CRITICAL/HIGH R4 findings outstanding (all resolved pre-R5).
+- `tsc --noEmit` clean.
+- All 3 items UAT PASS.
+
+### Known WARNs (non-blocking, deferred)
+- Transport-mode regex in import script does not yet handle all freeform Trello label strings — follow-up filed.
+- Storage bucket validation shape returns a slightly wider type than the declared interface — follow-up filed.
+
+---
+
 ## v0.3.0 — Sprint 3: Itinerary Depth + Role Management (2026-04-28)
 
 Sprint 3 adds structured transportation and accommodation records to trip itineraries, and completes member role management — giving owners full control over collaborator permissions.

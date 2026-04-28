@@ -13,6 +13,7 @@ import { SkeletonCard } from "@/components/Skeletons";
 import { formatShortDate } from "@/lib/utils/format";
 import { ROLE_LABEL } from "@/lib/utils/members";
 import { secondaryButtonClass } from "@/components/ui/FormField";
+import { InitialsAvatar } from "@/components/profile/InitialsAvatar";
 import { MemberRoleControls } from "./MemberRoleControls";
 
 interface MembersListProps {
@@ -129,7 +130,15 @@ export function MembersList({
               key={m.user_id}
               className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
             >
-              <div className="min-w-0">
+              <div className="min-w-0 flex items-center gap-3">
+                <InitialsAvatar
+                  name={m.profile.full_name}
+                  email={m.profile.email}
+                  avatarUrl={m.profile.avatar_url}
+                  size={40}
+                  className="shrink-0"
+                />
+                <div className="min-w-0">
                 <p className="text-sm font-medium text-zinc-900 dark:text-zinc-50 truncate">
                   {label}
                   {isSelf && (
@@ -156,6 +165,7 @@ export function MembersList({
                       </span>
                     </>
                   )}
+                </div>
                 </div>
               </div>
 

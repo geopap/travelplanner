@@ -1,6 +1,6 @@
 {
   "name": "app",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "import:trello": "tsx scripts/import-trello.ts"
   },
   "dependencies": {
     "@supabase/auth-helpers-nextjs": "^0.15.0",

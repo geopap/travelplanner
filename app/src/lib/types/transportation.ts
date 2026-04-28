@@ -3,7 +3,7 @@
 
 import type { ItineraryItem } from './domain';
 
-export type TransportMode = 'flight' | 'train' | 'bus' | 'car' | 'ferry';
+export type TransportMode = 'flight' | 'train' | 'bus' | 'car' | 'ferry' | 'other';
 
 export interface Transportation {
   id: string;

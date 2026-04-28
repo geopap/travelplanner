@@ -8,6 +8,7 @@ export const TransportMode = z.enum([
   'bus',
   'car',
   'ferry',
+  'other',
 ]);
 export type TransportMode = z.infer<typeof TransportMode>;
 
