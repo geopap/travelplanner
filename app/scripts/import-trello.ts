@@ -239,16 +239,19 @@ export function inferTransportMode(name: string): TransportMode {
   return 'other';
 }
 
-const HOTEL_PREFIX_RE = /^(checkin|check-in|checkout|check-out)\s*-\s*/i;
+// Tolerates spelling variants seen in real Trello data: "Checkin", "Check-in",
+// "Check in", "Checkout", "Check-out", "Check out", and the typo "Chekout".
+// Optional "-" separator between prefix and hotel name.
+const HOTEL_CHECKIN_RE = /^check[\s-]?in\b\s*-?\s*/i;
+const HOTEL_CHECKOUT_RE = /^(?:check[\s-]?out|chekout)\b\s*-?\s*/i;
 
 export function hotelKind(cardName: string): { kind: 'checkin' | 'checkout' | 'unknown'; canonical: string } {
   const trimmed = cardName.trim();
-  const lower = trimmed.toLowerCase();
-  if (lower.startsWith('checkin') || lower.startsWith('check-in')) {
-    return { kind: 'checkin', canonical: trimmed.replace(HOTEL_PREFIX_RE, '').replace(/\s+/g, ' ').trim() };
+  if (HOTEL_CHECKIN_RE.test(trimmed)) {
+    return { kind: 'checkin', canonical: trimmed.replace(HOTEL_CHECKIN_RE, '').replace(/\s+/g, ' ').trim() };
   }
-  if (lower.startsWith('checkout') || lower.startsWith('check-out')) {
-    return { kind: 'checkout', canonical: trimmed.replace(HOTEL_PREFIX_RE, '').replace(/\s+/g, ' ').trim() };
+  if (HOTEL_CHECKOUT_RE.test(trimmed)) {
+    return { kind: 'checkout', canonical: trimmed.replace(HOTEL_CHECKOUT_RE, '').replace(/\s+/g, ' ').trim() };
   }
   return { kind: 'unknown', canonical: trimmed };
 }
