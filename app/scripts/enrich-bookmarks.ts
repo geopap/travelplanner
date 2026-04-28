@@ -23,8 +23,96 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
-import { searchPlaces, type PlaceSearchResult } from '../src/lib/google/places';
-import type { BookmarkCategory } from '../src/lib/types/domain';
+import { mapGoogleTypesToCategory } from '../src/lib/google/categories';
+import type { BookmarkCategory, PlaceSearchResult } from '../src/lib/types/domain';
+
+// Inline call to Google Places v1 textSearch — `lib/google/places.ts` is
+// marked `server-only` (Next.js runtime guard) and can't be imported by a
+// plain tsx script. We replicate just the textSearch path here.
+const GOOGLE_TEXT_SEARCH_URL = 'https://places.googleapis.com/v1/places:searchText';
+const FIELD_MASK = 'places.id,places.displayName,places.formattedAddress,places.location,places.types';
+const REQUEST_TIMEOUT_MS = 5000;
+
+interface GooglePlaceRaw {
+  id?: unknown;
+  displayName?: unknown;
+  formattedAddress?: unknown;
+  location?: unknown;
+  types?: unknown;
+}
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+function asStr(v: unknown): string | null {
+  return typeof v === 'string' ? v : null;
+}
+function asNum(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+function asStrArr(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const t of v) if (typeof t === 'string') out.push(t);
+  return out;
+}
+
+function parseRawPlace(raw: unknown): PlaceSearchResult | null {
+  if (!isObj(raw)) return null;
+  const r = raw as GooglePlaceRaw;
+  const id = asStr(r.id);
+  if (!id) return null;
+  let name: string | null = null;
+  if (isObj(r.displayName)) name = asStr((r.displayName as Record<string, unknown>).text);
+  if (!name) return null;
+  let lat: number | null = null;
+  let lng: number | null = null;
+  if (isObj(r.location)) {
+    const loc = r.location as Record<string, unknown>;
+    lat = asNum(loc.latitude);
+    lng = asNum(loc.longitude);
+  }
+  return {
+    google_place_id: id,
+    name,
+    formatted_address: asStr(r.formattedAddress),
+    lat,
+    lng,
+    category: mapGoogleTypesToCategory(asStrArr(r.types)),
+  };
+}
+
+async function searchPlaces(query: string, apiKey: string): Promise<PlaceSearchResult[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(GOOGLE_TEXT_SEARCH_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': FIELD_MASK,
+      },
+      body: JSON.stringify({ textQuery: query, maxResultCount: 5, languageCode: 'en' }),
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok) throw new Error(`places_http_${res.status}`);
+  const raw: unknown = await res.json();
+  const arr = isObj(raw) && Array.isArray((raw as { places?: unknown }).places)
+    ? ((raw as { places: unknown[] }).places)
+    : [];
+  const out: PlaceSearchResult[] = [];
+  for (const item of arr) {
+    const p = parseRawPlace(item);
+    if (p) out.push(p);
+  }
+  return out;
+}
 
 interface CliArgs {
   tripId: string;
@@ -160,6 +248,7 @@ async function upsertPlace(
 
 async function enrichOne(
   client: SupabaseClient,
+  apiKey: string,
   bookmark: BookmarkRow,
   dryRun: boolean,
 ): Promise<'enriched' | 'no_results' | 'error' | 'skipped'> {
@@ -168,7 +257,7 @@ async function enrichOne(
 
   let results: PlaceSearchResult[];
   try {
-    results = await searchPlaces(query);
+    results = await searchPlaces(query, apiKey);
   } catch (err) {
     logError('places_search_failed', {
       bookmarkId: bookmark.id,
@@ -226,8 +315,6 @@ async function main(): Promise<void> {
     throw new Error('SUPABASE_SERVICE_ROLE_KEY appears to be the anon key — refusing to proceed (RLS would block updates)');
   }
 
-  // searchPlaces reads the API key from process.env at call time.
-  process.env.GOOGLE_PLACES_API_KEY = placesKey;
 
   logInfo('starting bookmark enrichment', {
     tripId: args.tripId,
@@ -261,7 +348,7 @@ async function main(): Promise<void> {
   logInfo('bookmarks to process', { count: summary.total });
 
   for (const b of bookmarks) {
-    const result = await enrichOne(client, b, args.dryRun);
+    const result = await enrichOne(client, placesKey, b, args.dryRun);
     if (result === 'enriched') summary.enriched++;
     else if (result === 'no_results') summary.noResults++;
     else if (result === 'error') summary.errors++;
