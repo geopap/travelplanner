@@ -6,9 +6,9 @@ A personal travel planning app for organising multi-leg trips end-to-end: flight
 
 - Next.js 16, React 19, TypeScript (strict)
 - Tailwind CSS v4
-- Supabase (Postgres + Auth + Row Level Security)
+- Postgres with Row Level Security — currently hosted on **Supabase** (Auth + Storage + RLS). The schema is standard Postgres and portable to any Postgres host; replacing Supabase Auth would require swapping `@supabase/ssr` clients and re-issuing the JWT claims that RLS policies expect (`auth.uid()`).
 - Leaflet + react-leaflet
-- Google Places API
+- Google Places API (server-side proxy)
 
 ## Repository layout
 
