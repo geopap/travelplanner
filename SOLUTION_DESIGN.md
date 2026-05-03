@@ -50,7 +50,7 @@
     ├── supabase/
     │   └── migrations/            # 0001_init.sql, 0002_*, …
     ├── scripts/
-    │   └── import-trello.ts       # Japan 2026 seed import (idempotent)
+    │   └── import-trello.ts       # Trello-export trip import (idempotent)
     └── public/
 ```
 
@@ -2364,7 +2364,7 @@ create policy avatars_delete_own on storage.objects
 
 ### B-016 — Trello import (one-shot script)
 
-This subsection locks the schema delta, label-routing rules, hotel pairing logic, atomicity model, and operational guardrails for `app/scripts/import-trello.ts` — the one-shot importer that hydrates the Japan 2026 trip from `app/scripts/data/japan-2026.json` (copied from `onboarding/fWkLqBPa - japan-2026.json` at R3).
+This subsection locks the schema delta, label-routing rules, hotel pairing logic, atomicity model, and operational guardrails for `app/scripts/import-trello.ts` — the one-shot importer that hydrates a trip from a Trello board JSON export. The exact source-card layout (checklists, labels, attachments) is the standard Trello board export shape; the script is parameterised by trip name + start/end date and is not specific to any one trip.
 
 #### B-016.1 Schema delta — migration `0011_trello_import.sql`
 
@@ -2449,7 +2449,7 @@ alter table public.itinerary_items drop column if exists source_card_id;
 commit;
 ```
 
-The rollback's docstring must call out the prerequisite: delete importer rows first (`delete from <table> where source_card_id is not null and trip_id = '<japan-trip-uuid>'`), or `set not null` on `bookmarks.place_id` will fail.
+The rollback's docstring must call out the prerequisite: delete importer rows first (`delete from <table> where source_card_id is not null and trip_id = '<imported-trip-uuid>'`), or `set not null` on `bookmarks.place_id` will fail.
 
 #### B-016.2 Updated table baselines
 
@@ -2465,7 +2465,7 @@ source_card_id text   -- Trello card id; null for non-imported rows; unique per 
 
 **Correction to the R1 handoff note in SPRINT.md:** there is no automatic `trip_days` creation trigger. `0001_init.sql` ships only `tg_seed_owner_member` on `trips`. The importer therefore:
 
-1. Creates the `trips` row (`base_currency='CHF'`, `start_date=2026-11-13`, `end_date=2026-12-08`, `created_by=<owner-uuid>`, `name='Japan 2026'`) — idempotent on `(created_by, name='Japan 2026')`.
+1. Creates the `trips` row (`base_currency`, `start_date`, `end_date`, `created_by=<owner-uuid>`, `name`) from script arguments — idempotent on `(created_by, name)`.
 2. Generates `trip_days` rows for every date in `[start_date, end_date]` via `insert ... select generate_series(...) on conflict (trip_id, date) do nothing`. Existing `unique (trip_id, date)` makes this safe to re-run.
 3. Builds an in-memory `Map<DD.MM.YYYY, trip_day_id>` from `select id, date from trip_days where trip_id = $1`.
 4. Routes each card to its list's date and looks up `day_id` from the map.
@@ -2520,7 +2520,7 @@ for (const card of cards) {
 
 Hotel pairs upsert as one row keyed on the Checkin's `source_card_id`; if upsert fails, only that pair is skipped.
 
-The trip row uses idempotency key `(created_by, name='Japan 2026')`. If found, reuse `id`; otherwise insert. The script never deletes — re-runs only insert/update.
+The trip row uses idempotency key `(created_by, name)` from the script arguments. If found, reuse `id`; otherwise insert. The script never deletes — re-runs only insert/update.
 
 **Dry-run (`--dry-run`)**: the script computes the full plan (hotel pairs + label routing) and logs the planned writes (target table, source_card_id, key fields) without invoking `.upsert()`. Exit code 0 on success.
 
@@ -2585,7 +2585,7 @@ This subsection is the source of truth for the as-shipped state of Sprint 4. Whe
 
 These were identified during Sprint 4 review/test but deliberately deferred — they do not block sprint close.
 
-1. **`inferTransportMode` regex priority bug** — in the Trello importer's mode-inference helper, the `flight` regex (`/flight|fly/i`) is evaluated before `bus`, so a card named `"Bus to airport"` matches `flight` (because `fly` is not in the string but the order is wrong for "airport"-bearing strings) and gets imported with `mode='flight'`. Pre-flagged by [test-engineer] in the Sprint 4 R5 report. Acceptable for v1 because (a) the importer is one-shot, (b) the resulting row is manually editable in the UI, and (c) the affected card count in the Japan 2026 seed is ≤ 1. **Recommended fix next sprint:** reorder regex tests so the most specific keywords (`bus`, `ferry`, `train`) match before `flight`, or switch to a lookup table keyed on whitelisted tokens. File: `app/scripts/import-trello.ts`.
+1. **`inferTransportMode` regex priority bug** — in the Trello importer's mode-inference helper, the `flight` regex (`/flight|fly/i`) is evaluated before `bus`, so a card named `"Bus to airport"` matches `flight` (because `fly` is not in the string but the order is wrong for "airport"-bearing strings) and gets imported with `mode='flight'`. Pre-flagged by [test-engineer] in the Sprint 4 R5 report. Acceptable for v1 because (a) the importer is one-shot, (b) the resulting row is manually editable in the UI, and (c) the affected card count in the seed exports observed so far is ≤ 1. **Recommended fix next sprint:** reorder regex tests so the most specific keywords (`bus`, `ferry`, `train`) match before `flight`, or switch to a lookup table keyed on whitelisted tokens. File: `app/scripts/import-trello.ts`.
 2. **B-008 AC-6 — N+1 `fromCalls` assertion** — carryover from Sprint 3. The accommodations day-indicator integration test asserts the indicator query is single-batched, but the assertion uses a loose `expect(fromCalls.length).toBeGreaterThan(0)` instead of `=== 1`. Tracked in BACKLOG.md; not a regression introduced by Sprint 4.
 
 ---

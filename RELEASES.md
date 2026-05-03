@@ -4,13 +4,13 @@ Local reference copy. Source of truth: GitHub Releases.
 
 ---
 
-## v0.4.0 — Sprint 4: Money, Profiles, Japan import (2026-04-28)
+## v0.4.0 — Budget & expenses, profiles, Trello import (2026-04-28)
 
-Sprint 4 adds per-trip expense tracking with per-member balance computation, a full profile management page with avatar upload, and a one-shot Trello import script that seeds the 26-day Japan 2026 trip.
+Adds per-trip expense tracking with per-member balance computation, a full profile management page with avatar upload, and a Trello import script that hydrates a trip from a Trello export JSON.
 
 ### Highlights
 - **B-014 Budget & expenses** — New `expenses` table (trip-scoped, role-gated). 6 endpoints: `POST/GET /api/trips/[id]/expenses` (paginated), `GET/PATCH/DELETE /api/trips/[id]/expenses/[expenseId]`, `GET /api/trips/[id]/expenses/balances`. Per-member balance computation via `get_trip_balances` RPC. `get_trip_expense_total` RPC for budget overview widget. All mutations audit-logged. Viewer role read-only enforced at RLS + app layer.
-- **B-016 Japan 2026 Trello import script** — One-shot importer at `app/scripts/import-trello.ts`. Supports `--dry-run` mode; idempotent via `source_card_id` column on items/accommodations/bookmarks. Migrates checklist items as itinerary sub-items, attachments as notes, labels as categories. Covers the full 26-day Japan trip from a Trello export JSON.
+- **B-016 Trello import script** — Importer at `app/scripts/import-trello.ts` with `--dry-run` mode. Idempotent via `source_card_id` column on items/accommodations/bookmarks. Migrates checklist items as itinerary sub-items, attachments as notes, labels as categories.
 - **B-017 Profile management** — `/settings/profile` page with display name + bio editing, avatar upload/replace/delete via Supabase Storage (`avatars` bucket). `PATCH /api/profile` endpoint. Member lists across all trip views now render avatar thumbnails with initials fallback.
 
 ### Database
@@ -121,6 +121,6 @@ First tagged release. Authenticated trip planner skeleton with day-by-day itiner
 - Transportation + accommodations structured fields.
 - Trip-member invitations.
 - Leaflet day map.
-- Japan 2026 Trello import script.
+- Trello import script.
 - Playwright e2e.
 - Upstash distributed rate limiting.
