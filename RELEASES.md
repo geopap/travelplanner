@@ -4,6 +4,31 @@ Local reference copy. Source of truth: GitHub Releases.
 
 ---
 
+## v0.7.0 — Place-link polish + flight number (2026-05-16)
+
+Sprint 7 adds re-linking bookmarks/itinerary items to the correct Google Place when the original pick was wrong, a mini-map on the place detail page, tabbed category filtering on the Places tab, and flight number on transportation records.
+
+### Highlights
+- **B-026 Bookmark/itinerary relink** — `POST /api/trips/[id]/bookmarks/relink` with `RelinkPlaceDialog` + `RelinkTriggerPill`. New `place_id_locked` boolean on bookmarks; locked records are skipped by automated re-enrichment. Membership check enforced inside `relink_place` RPC (CRITICAL finding fixed). Rollback: `0023_place_id_locked_rollback.sql`.
+- **B-027 Mini-map on place detail** — `<PlaceMiniMap>` / `<PlaceMiniMapInner>` (SSR-safe via `next/dynamic`) render a single-marker Leaflet map on `/places/[id]`. "Open in Maps" pill links to `maps.google.com/?q=<lat>,<lng>`. No new endpoint; coordinates from existing `places.cached_details`.
+- **B-028 ARIA tabs — Places page** — `<BookmarkList>` refactored to ARIA-compliant tab panel (`role=tablist/tab/tabpanel`, `aria-selected`, keyboard nav). Category filter now scoped client-side; no extra round-trips.
+- **B-029 Flight number** — `flight_number varchar(20)` column on `transportation` (nullable); exposed in `TransportFields`, `TransportationTabClient`, `TransportSummary`, import script, and all validation schemas. `tg_transport_updated_at` trigger updated. Rollback: `0022_transportation_flight_number_rollback.sql`.
+
+### Database
+- Migration `0022_transportation_flight_number.sql`: adds `flight_number` column to `transportation`; updates `create_transport_item` / `update_transport_item` RPCs. Rollback: `0022_transportation_flight_number_rollback.sql`.
+- Migration `0023_place_id_locked.sql`: adds `place_id_locked boolean not null default false` to `bookmarks`; new `relink_place` SECURITY DEFINER RPC with in-function membership check. Rollback: `0023_place_id_locked_rollback.sql`.
+
+### Quality
+- 814/814 vitest tests passing (+49 new: `bookmarks-relink`, `place-mini-map`, `bookmark-list-tabs`, `places-relink` validations).
+- 1 CRITICAL fixed (relink_place RPC in-function membership check); 1 MEDIUM + 5 LOW deferred.
+- All 4 items UAT PASS.
+
+### Known follow-ups (deferred)
+- 1 MEDIUM (optimistic-lock race on concurrent relink) + 5 LOW findings deferred to next sprint.
+- `place-resolver.ts` shared module — future dependents through R2 (carried from S6).
+
+---
+
 ## v0.6.0 — Day-view completeness: Trello items, hotel markers, interactive chips (2026-05-16)
 
 Makes the day view the canonical "what's happening today" surface. Promotes labeled Trello cards to day items (B-022, with a one-shot `--backfill` against the Japan 2026 trip), adds hotel markers + place-enrichment to the day-view map (B-023), and turns the accommodation indicator chips into interactive entry points (B-024). Bundles four out-of-sprint commits (transport CRUD page, budget total includes bookings, expense auto-sync from bookings) that landed on the branch between v0.5.0 and S6 start.
