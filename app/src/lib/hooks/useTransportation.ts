@@ -24,14 +24,15 @@ export interface UseTransportationResult {
   error: string | null;
   /** Re-fetch the current page. */
   refetch: () => Promise<void>;
+  setPage: (page: number) => void;
 }
 
 export function useTransportation(
   tripId: string,
-  options: { page?: number; limit?: number } = {},
+  options: { initialPage?: number; limit?: number } = {},
 ): UseTransportationResult {
-  const page = options.page ?? 1;
   const limit = options.limit ?? 20;
+  const [page, setPage] = useState(options.initialPage ?? 1);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">(
     "loading",
@@ -79,5 +80,5 @@ export function useTransportation(
     setRefetchKey((k) => k + 1);
   }, []);
 
-  return { status, items, page, limit, total, error, refetch };
+  return { status, items, page, limit, total, error, refetch, setPage };
 }
