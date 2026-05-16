@@ -23,6 +23,11 @@ export interface ExpensePaidByProfile {
   avatar_url: string | null;
 }
 
+export type ExpenseSourceKind =
+  | 'accommodation'
+  | 'transportation'
+  | 'itinerary_item';
+
 export interface Expense {
   id: string;
   trip_id: string;
@@ -40,6 +45,10 @@ export interface Expense {
   created_by: string | null;
   created_at: string;
   updated_at: string;
+  /** When non-null, this row is auto-synced from a booking table — edit/delete
+   *  flow through the source row, not the expense. */
+  source_kind: ExpenseSourceKind | null;
+  source_id: string | null;
 }
 
 /** Insert DTO accepted by `POST /api/trips/[id]/expenses`. */

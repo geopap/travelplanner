@@ -275,6 +275,14 @@ export function ExpensesList({
           const meta = CATEGORY_META[exp.category];
           const paidLabel = paidByLabel(exp.paid_by_profile);
           const splitCount = exp.split_among.length;
+          const sourceLabel =
+            exp.source_kind === "accommodation"
+              ? "From accommodation"
+              : exp.source_kind === "transportation"
+                ? "From transport"
+                : exp.source_kind === "itinerary_item"
+                  ? "From itinerary item"
+                  : null;
           return (
             <li
               key={exp.id}
@@ -294,6 +302,14 @@ export function ExpensesList({
                     >
                       {meta.label}
                     </span>
+                    {sourceLabel && (
+                      <span
+                        className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                        title="Synced from a booking — edit the source to change."
+                      >
+                        {sourceLabel}
+                      </span>
+                    )}
                     <span className="text-xs text-zinc-500">
                       <time dateTime={exp.occurred_at}>
                         {formatShortDate(exp.occurred_at)}
@@ -331,7 +347,7 @@ export function ExpensesList({
                     </span>
                   </div>
                 </div>
-                {canEdit && (
+                {canEdit && !exp.source_kind && (
                   <div className="shrink-0 flex flex-col sm:flex-row gap-1">
                     <button
                       type="button"

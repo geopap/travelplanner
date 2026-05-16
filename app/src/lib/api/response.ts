@@ -41,6 +41,7 @@ export type ApiErrorCode =
   | 'invalid_currency'
   | 'date_out_of_range'
   | 'member_not_in_trip'
+  | 'synced_expense_readonly'
   | 'share_pct_invalid'
   | 'unsupported_source'
   | 'source_fetch_failed'
