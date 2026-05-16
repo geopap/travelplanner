@@ -19,6 +19,7 @@ import {
 } from '@/lib/api/response';
 import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
+import { resolveGooglePlaceId } from '@/lib/supabase/place-resolver';
 
 type RouteCtx = {
   params: Promise<{ id: string; accommodationId: string }>;
@@ -110,10 +111,65 @@ export async function PATCH(
     if (!parsed.success) return validationError(parsed.error);
     const input = parsed.data;
 
+    // B-023: reject mixed identity payloads outright — the server can't tell
+    // which the user meant. Acceptable combinations:
+    //   - place_id: <uuid>             → set FK directly
+    //   - place_id: null               → clear FK (must keep hotel_name)
+    //   - google_place_id: <gpid>      → resolve to FK
+    //   - google_place_id: null        → equivalent to no-op (ignored)
+    if ('place_id' in input && 'google_place_id' in input) {
+      // Two exceptions to reject: both non-null, or place_id:null + gpid set
+      // (architect: "If both google_place_id and place_id: null are present,
+      // reject with 400").
+      const placeIdSent = input.place_id !== undefined;
+      const gpidSent =
+        input.google_place_id !== undefined && input.google_place_id !== null;
+      if (placeIdSent && gpidSent) {
+        return badRequest(
+          'Send either place_id or google_place_id, not both',
+        );
+      }
+    }
+
+    // Resolve google_place_id → places.id (overrides any place_id in input
+    // only when the architect-allowed shape is used; mixing was rejected
+    // above).
+    let resolvedPlaceIdPatch: string | null | undefined = input.place_id;
+    if (
+      input.google_place_id !== undefined &&
+      input.google_place_id !== null
+    ) {
+      const resolved = await resolveGooglePlaceId(
+        supabase,
+        input.google_place_id,
+      );
+      if (!resolved.ok) {
+        if (resolved.reason === 'not_cached') {
+          return errorResponse(
+            'place_not_cached',
+            'Place is not cached; fetch place details first',
+            400,
+          );
+        }
+        return serverError();
+      }
+      resolvedPlaceIdPatch = resolved.placeId;
+    }
+
     // Cross-field constraints across PATCH + existing — re-check under merge.
+    // `place_id` semantics: explicit `null` in patch → cleared; `undefined` →
+    // unchanged (fall back to existing).
+    const placeIdMerged: string | null =
+      resolvedPlaceIdPatch === undefined
+        ? existing.place_id
+        : resolvedPlaceIdPatch;
+    const hotelNameMerged: string | null =
+      input.hotel_name === undefined
+        ? existing.hotel_name
+        : (input.hotel_name ?? null);
     const merged = {
-      place_id: input.place_id ?? existing.place_id ?? undefined,
-      hotel_name: input.hotel_name ?? existing.hotel_name ?? undefined,
+      place_id: placeIdMerged,
+      hotel_name: hotelNameMerged,
       check_in_date: input.check_in_date ?? existing.check_in_date,
       check_out_date: input.check_out_date ?? existing.check_out_date,
       cost_per_night:
@@ -122,10 +178,12 @@ export async function PATCH(
       currency: input.currency ?? existing.currency ?? null,
     };
 
-    if (!merged.place_id && !merged.hotel_name) {
+    if (!merged.place_id && (!merged.hotel_name || merged.hotel_name.trim() === '')) {
+      // Server-side guard mirrors the `accommodations_name_or_place` DB CHECK
+      // — prevents a PATCH that nulls place_id while hotel_name is also empty.
       return errorResponse(
-        'validation_error',
-        'Either hotel_name or place_id must remain set',
+        'name_or_place_required',
+        'Provide a hotel name or link a place',
         400,
         { fieldErrors: { hotel_name: ['hotel_name or place_id required'] } },
       );
@@ -175,12 +233,15 @@ export async function PATCH(
       }
     }
 
-    // Verify a newly-supplied place_id resolves.
-    if (input.place_id !== undefined && input.place_id !== null) {
+    // Verify a newly-supplied (resolved) place_id exists in `places`.
+    if (
+      resolvedPlaceIdPatch !== undefined &&
+      resolvedPlaceIdPatch !== null
+    ) {
       const { data: placeRow, error: placeErr } = await supabase
         .from('places')
         .select('id')
-        .eq('id', input.place_id)
+        .eq('id', resolvedPlaceIdPatch)
         .maybeSingle();
       if (placeErr) return serverError();
       if (!placeRow) {
@@ -190,7 +251,10 @@ export async function PATCH(
 
     // Build sparse update — only include keys actually present in the input.
     const patch: Record<string, unknown> = {};
-    if (input.place_id !== undefined) patch.place_id = input.place_id;
+    if (resolvedPlaceIdPatch !== undefined) {
+      // Either explicit-null (clear) or a resolved uuid.
+      patch.place_id = resolvedPlaceIdPatch;
+    }
     if (input.hotel_name !== undefined) patch.hotel_name = input.hotel_name;
     if (input.check_in_date !== undefined)
       patch.check_in_date = input.check_in_date;

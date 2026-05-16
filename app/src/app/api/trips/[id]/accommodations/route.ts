@@ -20,6 +20,7 @@ import {
 } from '@/lib/api/response';
 import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
+import { resolveGooglePlaceId } from '@/lib/supabase/place-resolver';
 
 type RouteCtx = { params: Promise<{ id: string }> };
 
@@ -152,12 +153,40 @@ export async function POST(
       );
     }
 
+    // B-023: client may submit `google_place_id` (from the place picker)
+    // instead of an internal `place_id`. Resolve to internal uuid via the
+    // places cache (mirrors the import save/route.ts pattern). Reject if the
+    // client tries to send both (server cannot disambiguate intent).
+    let resolvedPlaceId: string | null = input.place_id ?? null;
+    if (input.google_place_id) {
+      if (input.place_id) {
+        return badRequest(
+          'Send either place_id or google_place_id, not both',
+        );
+      }
+      const resolved = await resolveGooglePlaceId(
+        supabase,
+        input.google_place_id,
+      );
+      if (!resolved.ok) {
+        if (resolved.reason === 'not_cached') {
+          return errorResponse(
+            'place_not_cached',
+            'Place is not cached; fetch place details first',
+            400,
+          );
+        }
+        return serverError();
+      }
+      resolvedPlaceId = resolved.placeId;
+    }
+
     // Verify optional place_id exists.
-    if (input.place_id) {
+    if (resolvedPlaceId) {
       const { data: placeRow, error: placeErr } = await supabase
         .from('places')
         .select('id')
-        .eq('id', input.place_id)
+        .eq('id', resolvedPlaceId)
         .maybeSingle();
       if (placeErr) return serverError();
       if (!placeRow) {
@@ -167,7 +196,7 @@ export async function POST(
 
     const insertPayload = {
       trip_id: id,
-      place_id: input.place_id ?? null,
+      place_id: resolvedPlaceId,
       hotel_name: input.hotel_name ?? null,
       check_in_date: input.check_in_date,
       check_out_date: input.check_out_date,

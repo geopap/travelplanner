@@ -14,7 +14,7 @@ import {
   formatDateRange,
   pickAccommodationCost,
 } from "@/lib/utils/format";
-import { nameFor } from "./AccommodationsList";
+import { nameFor } from "@/lib/utils/accommodations";
 
 interface AccommodationsSummaryProps {
   tripId: string;

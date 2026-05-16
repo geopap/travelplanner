@@ -420,11 +420,17 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
               transportationByItemId={transportationByItemId}
               indicators={dayIndicators.byDayId[day.id] ?? []}
               role={role}
+              tripStartDate={trip.start_date}
+              tripEndDate={trip.end_date}
+              tripBaseCurrency={trip.base_currency}
               onTitleChange={onDayTitleChange}
               onAddItem={openCreate}
               onAddAccommodation={(d) =>
                 setAccDrawer({ open: true, dayDate: d.date })
               }
+              onAccommodationMutated={() => {
+                void dayIndicators.refetch();
+              }}
               onEditItem={openEdit}
               onDeleteItem={(_, item) =>
                 setDel({

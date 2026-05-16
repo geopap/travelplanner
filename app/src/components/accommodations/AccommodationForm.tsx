@@ -6,14 +6,17 @@
 //   - leave hotel name blank and rely on a linked place (when a place picker
 //     is wired up — see note below).
 //
-// Place picker note: the existing places search returns `google_place_id`,
-// but the accommodations API expects an internal UUID `place_id`. There is
-// no public endpoint that resolves google_place_id → places.id. To keep this
-// PR backend-clean we accept hotel_name only in v1 and surface place_id when
-// pre-existing (edit mode). Selecting via search will be enabled once the
-// backend exposes a resolver.
+// B-023 — Place picker is now wired in. The form accepts a Google place
+// selection via <PlaceSearchInput/>; on submit the `google_place_id` is sent
+// to the backend, which resolves it to an internal `places.id` server-side.
+// On edit, clearing a previously-linked place sends `place_id: null`
+// explicitly so the backend detaches the FK. The `accommodations_name_or_place`
+// DB constraint is guarded client-side: at least one of (linked place,
+// non-empty hotel name) must be present at submit.
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { PlaceSearchInput } from "@/components/places/PlaceSearchInput";
+import type { PlaceSearchResult } from "@/lib/hooks/usePlaceSearch";
 import type {
   AccommodationCreateDTO,
   AccommodationPatchDTO,
@@ -56,6 +59,8 @@ interface FormErrors {
   total_cost?: string;
   currency?: string;
   notes?: string;
+  /** B-023 — name-or-place client guard for the DB constraint. */
+  place?: string;
 }
 
 const CONFIRMATION_MAX = 80;
@@ -127,6 +132,21 @@ export function AccommodationForm({
   );
   const [notes, setNotes] = useState<string>(initial?.notes ?? "");
 
+  // B-023 — place picker state.
+  // `linkedPlaceId` mirrors the row's current internal place_id (uuid) for the
+  // edit path. When the user picks a NEW place we set `pickedGooglePlaceId`
+  // (sent to the backend for resolution) and clear `linkedPlaceId` so the
+  // "linked place: …" badge no longer claims the old link is still attached.
+  // When the user clears the picker we set both to null and send an explicit
+  // `place_id: null` on PATCH to detach.
+  const [linkedPlaceId, setLinkedPlaceId] = useState<string | null>(
+    initial?.place_id ?? null,
+  );
+  const [pickedGooglePlaceId, setPickedGooglePlaceId] = useState<string | null>(
+    null,
+  );
+  const [pickedPlaceName, setPickedPlaceName] = useState<string | null>(null);
+
   const [errors, setErrors] = useState<FormErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -145,8 +165,31 @@ export function AccommodationForm({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, submitting]);
 
-  const hasPlaceLink = initial?.place_id != null;
-  const placeLabel = placeName ?? null;
+  // True when the form will submit with some place reference (either a
+  // pre-existing internal link that wasn't cleared, OR a freshly-picked
+  // google_place_id). Drives the "hotel name optional" UX and the DB
+  // constraint guard.
+  const hasPlaceLink = linkedPlaceId !== null || pickedGooglePlaceId !== null;
+  const placeLabel = pickedPlaceName ?? placeName ?? null;
+
+  function handlePlacePicked(place: PlaceSearchResult): void {
+    setPickedGooglePlaceId(place.google_place_id);
+    setPickedPlaceName(place.name);
+    // The new pick supersedes any previously-linked place. Clear the internal
+    // FK so the submit logic doesn't carry it forward.
+    setLinkedPlaceId(null);
+    // Surfacing a successful pick clears any name-or-place validation error.
+    setErrors((prev) => {
+      const { place: _placeErr, ...rest } = prev;
+      return rest;
+    });
+  }
+
+  function handleClearPlace(): void {
+    setPickedGooglePlaceId(null);
+    setPickedPlaceName(null);
+    setLinkedPlaceId(null);
+  }
 
   function validate(): {
     payload?: AccommodationCreateDTO | AccommodationPatchDTO;
@@ -156,7 +199,9 @@ export function AccommodationForm({
     const trimmedName = hotelName.trim();
 
     if (!hasPlaceLink && trimmedName.length === 0) {
-      fe.hotel_name = "Hotel name is required (or link a place).";
+      // Single error key (`place`) covers the DB constraint
+      // `accommodations_name_or_place CHECK (place_id IS NOT NULL OR hotel_name IS NOT NULL)`.
+      fe.place = "Provide a hotel name or link a place.";
     } else if (trimmedName.length > HOTEL_NAME_MAX) {
       fe.hotel_name = `Hotel name is too long (max ${HOTEL_NAME_MAX}).`;
     }
@@ -230,7 +275,13 @@ export function AccommodationForm({
       check_out_date: checkOutDate,
     };
     if (trimmedName) payload.hotel_name = trimmedName;
-    if (initial?.place_id) payload.place_id = initial.place_id;
+    // B-023: a freshly-picked place wins over a pre-existing FK; the backend
+    // resolves google_place_id → places.id server-side.
+    if (pickedGooglePlaceId) {
+      payload.google_place_id = pickedGooglePlaceId;
+    } else if (linkedPlaceId) {
+      payload.place_id = linkedPlaceId;
+    }
     const trimmedConf = confirmation.trim();
     if (trimmedConf) payload.confirmation = trimmedConf;
     if (cpnNum !== null) payload.cost_per_night = cpnNum;
@@ -251,7 +302,19 @@ export function AccommodationForm({
     if (!payload) return null;
     // For PATCH, we always send the user's current values for these fields,
     // letting the server diff. Optional null-out for cleared text fields:
-    const patch: AccommodationPatchDTO = { ...payload };
+    // start from the create-shaped payload but strip its `place_id` (which
+    // may carry the row's pre-existing FK — we re-derive below in PATCH terms).
+    const { place_id: _ignored, ...rest } = payload as AccommodationCreateDTO;
+    const patch: AccommodationPatchDTO = { ...rest };
+    // Place-link diff (B-023):
+    //   - new google pick           → google_place_id (resolved server-side)
+    //   - same internal link        → omit (server treats undefined as no-change)
+    //   - cleared a prior link      → explicit place_id: null
+    if (pickedGooglePlaceId) {
+      patch.google_place_id = pickedGooglePlaceId;
+    } else if (linkedPlaceId === null && initial?.place_id != null) {
+      patch.place_id = null;
+    }
     if (mode === "edit") {
       // Allow clearing fields when edited away from a value.
       if (initial?.confirmation && confirmation.trim() === "") {
@@ -288,6 +351,8 @@ export function AccommodationForm({
         return "Currency is required when a cost is entered.";
       case "place_not_found":
         return "Linked place no longer exists. Remove the link and try again.";
+      case "place_not_cached":
+        return "We couldn't find that place in our cache. Re-select it from the picker and try again.";
       default:
         return fallback;
     }
@@ -391,14 +456,42 @@ export function AccommodationForm({
             </button>
           </div>
 
-          {hasPlaceLink && placeLabel && (
-            <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/50 p-3 text-xs text-zinc-600 dark:text-zinc-400">
-              <span className="font-medium text-zinc-800 dark:text-zinc-200">
-                Linked place:
-              </span>{" "}
-              {placeLabel}
-            </div>
-          )}
+          {/* B-023 — place picker. Optional: leave empty to fall back to a
+              typed hotel name. Picking a place sends google_place_id on
+              submit; the backend resolves it to an internal places.id. */}
+          <FormField
+            id="acc-place-picker"
+            label="Linked place"
+            hint="Optional — pick a hotel from Google Places to enable map plotting and cached details."
+            error={errors.place}
+          >
+            {hasPlaceLink && placeLabel ? (
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/50 p-3 text-sm text-zinc-700 dark:text-zinc-300">
+                <span className="min-w-0 truncate">
+                  <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                    {placeLabel}
+                  </span>
+                  {pickedGooglePlaceId && (
+                    <span className="ml-2 text-xs text-zinc-500">
+                      (new selection)
+                    </span>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleClearPlace}
+                  className="text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 underline underline-offset-2"
+                >
+                  Clear link
+                </button>
+              </div>
+            ) : (
+              <PlaceSearchInput
+                onSelect={handlePlacePicked}
+                placeholder="Search hotels…"
+              />
+            )}
+          </FormField>
 
           <FormField
             id="acc-hotel-name"

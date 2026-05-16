@@ -257,6 +257,12 @@ export function TripOverview({ tripId }: TripOverviewProps) {
       {canEdit && (
         <div className="mt-4 flex flex-wrap gap-2">
           <Link
+            href={`/trips/${trip.id}/transportation`}
+            className={secondaryButtonClass}
+          >
+            Manage transport
+          </Link>
+          <Link
             href={`/trips/${trip.id}/accommodations`}
             className={secondaryButtonClass}
           >

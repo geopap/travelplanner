@@ -91,11 +91,20 @@ export async function PATCH(
     // Verify the expense belongs to the URL's trip (defense-in-depth).
     const { data: existing, error: existingErr } = await supabase
       .from('expenses')
-      .select('id, trip_id, paid_by, split_among, currency, occurred_at')
+      .select('id, trip_id, paid_by, split_among, currency, occurred_at, source_kind')
       .eq('id', expenseId)
       .maybeSingle();
     if (existingErr) return serverError();
     if (!existing || existing.trip_id !== tripId) return notFound();
+
+    if (existing.source_kind) {
+      return errorResponse(
+        'synced_expense_readonly',
+        'This expense is auto-synced from a booking. Edit the source booking (accommodation, transport or itinerary item) instead.',
+        409,
+        { source_kind: existing.source_kind },
+      );
+    }
 
     let body: unknown;
     try {
@@ -255,11 +264,20 @@ export async function DELETE(
 
     const { data: existing, error: existingErr } = await supabase
       .from('expenses')
-      .select('id, trip_id, amount, currency, category, occurred_at')
+      .select('id, trip_id, amount, currency, category, occurred_at, source_kind')
       .eq('id', expenseId)
       .maybeSingle();
     if (existingErr) return serverError();
     if (!existing || existing.trip_id !== tripId) return notFound();
+
+    if (existing.source_kind) {
+      return errorResponse(
+        'synced_expense_readonly',
+        'This expense is auto-synced from a booking. Delete the source booking instead.',
+        409,
+        { source_kind: existing.source_kind },
+      );
+    }
 
     const { error: deleteErr } = await supabase
       .from('expenses')

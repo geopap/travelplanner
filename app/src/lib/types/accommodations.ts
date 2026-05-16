@@ -36,6 +36,12 @@ export interface AccommodationWithPlace extends Accommodation {
 /** Insert DTO accepted by `POST /api/trips/[id]/accommodations`. */
 export interface AccommodationCreateDTO {
   place_id?: string;
+  /**
+   * B-023 — alternative to `place_id`. When set, the backend resolves it to
+   * an internal `places.id` (cache-first; warms the cache on miss). Either
+   * `place_id` or `google_place_id` may be supplied; not both.
+   */
+  google_place_id?: string;
   hotel_name?: string;
   check_in_date: string;
   check_out_date: string;
@@ -46,14 +52,58 @@ export interface AccommodationCreateDTO {
   notes?: string;
 }
 
-/** Patch DTO accepted by `PATCH /api/trips/[id]/accommodations/[id]`. */
-export type AccommodationPatchDTO = Partial<AccommodationCreateDTO>;
+/**
+ * Patch DTO accepted by `PATCH /api/trips/[id]/accommodations/[id]`.
+ * Sibling of `AccommodationCreateDTO` with these B-023 extensions:
+ * - `place_id: null` — explicit clear of an existing place link.
+ * - `google_place_id?: string` — link to a new place; resolved server-side.
+ */
+export type AccommodationPatchDTO = Omit<
+  Partial<AccommodationCreateDTO>,
+  'place_id'
+> & {
+  place_id?: string | null;
+};
 
 export type AccommodationIndicatorType =
   | 'check_in'
   | 'in_stay'
   | 'check_out'
   | 'same_day';
+
+/**
+ * B-023 — Map-endpoint marker shape returned by
+ * `GET /api/trips/[id]/days/[dayId]/map` under `accommodations[]`. Place is
+ * guaranteed non-null (server filters `place_id IS NULL` rows out per AC 3).
+ */
+export interface AccommodationMapMarker {
+  accommodation_id: string;
+  hotel_name: string;
+  check_in_date: string;
+  check_out_date: string;
+  indicator_type: AccommodationIndicatorType;
+  place: { id: string; lat: number; lng: number; name: string };
+}
+
+/**
+ * B-023 — Map-endpoint itinerary item shape returned by
+ * `GET /api/trips/[id]/days/[dayId]/map` under `items[]`. Place may be null
+ * (the existing items list keeps the same invariant); the section's plottable
+ * filter drops nulls before passing to `<DayMap/>`.
+ */
+export interface DayMapItineraryItem {
+  id: string;
+  title: string;
+  type: string;
+  start_time: string | null;
+  place: { id: string; lat: number; lng: number; name: string } | null;
+}
+
+/** Full B-023 map endpoint response. */
+export interface DayMapResponse {
+  items: DayMapItineraryItem[];
+  accommodations: AccommodationMapMarker[];
+}
 
 export interface AccommodationDayIndicator {
   trip_id: string;

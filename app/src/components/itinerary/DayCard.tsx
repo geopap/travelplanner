@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ItineraryItem, MemberRole, TripDay } from "@/lib/types/domain";
 import type { Transportation } from "@/lib/types/transportation";
 import type { AccommodationDayIndicator } from "@/lib/types/accommodations";
@@ -9,6 +9,7 @@ import { formatDate } from "@/lib/utils/format";
 import { EmptyState } from "@/components/EmptyState";
 import { ItineraryItemCard } from "./ItineraryItemCard";
 import { StayIndicator } from "@/components/accommodations/StayIndicator";
+import { AccommodationDetailModal } from "@/components/accommodations/AccommodationDetailModal";
 import { DayMapSection } from "@/components/map/DayMapSection";
 
 interface DayCardProps {
@@ -19,10 +20,20 @@ interface DayCardProps {
   /** B-008 — accommodation indicators for this day (0..n rows). */
   indicators?: AccommodationDayIndicator[];
   role: MemberRole;
+  /** B-024 — trip metadata required to mount the accommodation edit form
+   *  from the indicator-chip detail modal. Optional so callers that do not
+   *  yet need interactive chips can omit it (the chip falls back to a
+   *  read-only span when not provided). */
+  tripStartDate?: string;
+  tripEndDate?: string;
+  tripBaseCurrency?: string;
   onTitleChange: (dayId: string, title: string | null) => void;
   onAddItem: (dayId: string) => void;
   /** B-008 — open the accommodation form pre-filled with this day's date. */
   onAddAccommodation?: (day: TripDay) => void;
+  /** B-024 — invoked after a successful edit or delete from the indicator
+   *  detail modal so the parent can re-fetch indicators/accommodations. */
+  onAccommodationMutated?: () => void;
   onEditItem: (dayId: string, item: ItineraryItem) => void;
   onDeleteItem: (dayId: string, item: ItineraryItem) => void;
 }
@@ -33,9 +44,13 @@ export function DayCard({
   transportationByItemId,
   indicators,
   role,
+  tripStartDate,
+  tripEndDate,
+  tripBaseCurrency,
   onTitleChange,
   onAddItem,
   onAddAccommodation,
+  onAccommodationMutated,
   onEditItem,
   onDeleteItem,
 }: DayCardProps) {
@@ -46,6 +61,33 @@ export function DayCard({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // B-024 — interactive accommodation chips. Each chip captures a ref so the
+  // detail modal can return focus to the triggering chip on close.
+  const indicatorTriggerRefs = useRef<Map<string, HTMLButtonElement | null>>(
+    new Map(),
+  );
+  const [openAccommodationId, setOpenAccommodationId] = useState<string | null>(
+    null,
+  );
+  const chipsInteractive =
+    tripStartDate !== undefined &&
+    tripEndDate !== undefined &&
+    tripBaseCurrency !== undefined;
+
+  const handleCloseAccommodationModal = useCallback(() => {
+    const id = openAccommodationId;
+    setOpenAccommodationId(null);
+    // Return focus to the originating chip on the next tick — refs survive
+    // re-render because indicators for the deleted id are removed by the
+    // parent only after onMutated runs.
+    if (id) {
+      requestAnimationFrame(() => {
+        const node = indicatorTriggerRefs.current.get(id);
+        node?.focus();
+      });
+    }
+  }, [openAccommodationId]);
 
   // Resync draft when incoming day.title prop changes (e.g. after a successful
   // save from another path). React 19-safe "update state from props" pattern.
@@ -165,6 +207,27 @@ export function DayCard({
               key={ind.accommodation_id}
               type={ind.indicator_type}
               name={ind.hotel_name ?? ""}
+              onClick={
+                chipsInteractive
+                  ? () => setOpenAccommodationId(ind.accommodation_id)
+                  : undefined
+              }
+              triggerRef={
+                chipsInteractive
+                  ? (node) => {
+                      if (node) {
+                        indicatorTriggerRefs.current.set(
+                          ind.accommodation_id,
+                          node,
+                        );
+                      } else {
+                        indicatorTriggerRefs.current.delete(
+                          ind.accommodation_id,
+                        );
+                      }
+                    }
+                  : undefined
+              }
             />
           ))}
         </div>
@@ -237,9 +300,36 @@ export function DayCard({
           </button>
         )}
 
-        {/* B-015 — Day-view map. Read-only for all roles (AC 9). */}
-        <DayMapSection tripId={day.trip_id} dayId={day.id} items={items} />
+        {/* B-015 / B-023 — Day-view map. Read-only for all roles.
+            DayMapSection fetches `/days/[dayId]/map` itself (items +
+            accommodations); the parent doesn't pass markers in any more. */}
+        <DayMapSection
+          tripId={day.trip_id}
+          dayId={day.id}
+          dayDate={day.date}
+        />
       </div>
+
+      {/* B-024 — accommodation indicator detail modal. */}
+      {chipsInteractive &&
+        openAccommodationId &&
+        tripStartDate &&
+        tripEndDate &&
+        tripBaseCurrency && (
+          <AccommodationDetailModal
+            tripId={day.trip_id}
+            accommodationId={openAccommodationId}
+            isOpen
+            canEdit={canEdit}
+            tripStartDate={tripStartDate}
+            tripEndDate={tripEndDate}
+            tripBaseCurrency={tripBaseCurrency}
+            onClose={handleCloseAccommodationModal}
+            onMutated={() => {
+              onAccommodationMutated?.();
+            }}
+          />
+        )}
     </article>
   );
 }

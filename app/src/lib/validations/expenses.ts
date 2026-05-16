@@ -148,7 +148,14 @@ export type ExpenseListQueryInput = z.infer<typeof ExpenseListQuery>;
 // ----------------------------------------------------------------------------
 
 export const EXPENSE_SELECT =
-  'id, trip_id, category, description, amount, currency, occurred_at, paid_by, split_among, created_by, created_at, updated_at, paid_by_profile:profiles!expenses_paid_by_fkey(id, full_name, email, avatar_url)';
+  'id, trip_id, category, description, amount, currency, occurred_at, paid_by, split_among, created_by, created_at, updated_at, source_kind, source_id, paid_by_profile:profiles!expenses_paid_by_fkey(id, full_name, email, avatar_url)';
+
+export const ExpenseSourceKindSchema = z.enum([
+  'accommodation',
+  'transportation',
+  'itinerary_item',
+]);
+export type ExpenseSourceKind = z.infer<typeof ExpenseSourceKindSchema>;
 
 const PaidByProfileSchema = z.object({
   id: z.string().uuid(),
@@ -175,6 +182,8 @@ export const ExpenseRowSchema = z.object({
   created_by: z.string().uuid().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
+  source_kind: ExpenseSourceKindSchema.nullable(),
+  source_id: z.string().uuid().nullable(),
   paid_by_profile: z
     .union([PaidByProfileSchema, z.array(PaidByProfileSchema)])
     .nullish(),
@@ -201,6 +210,8 @@ export function mapExpenseRow(row: ExpenseRow) {
     created_by: row.created_by,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    source_kind: row.source_kind,
+    source_id: row.source_id,
   };
 }
 

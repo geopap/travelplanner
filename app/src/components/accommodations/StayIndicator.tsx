@@ -13,6 +13,11 @@ interface StayIndicatorProps {
   type: AccommodationIndicatorType;
   /** Hotel display label — `hotel_name` or fallback `place.name`. */
   name: string;
+  /** B-024 — when set, the indicator becomes a button that opens a detail
+   *  modal. When omitted the indicator is a non-interactive span (legacy). */
+  onClick?: () => void;
+  /** B-024 — ref captured by the parent so focus can return on close. */
+  triggerRef?: React.Ref<HTMLButtonElement>;
 }
 
 interface Variant {
@@ -114,13 +119,33 @@ const VARIANTS: Record<AccommodationIndicatorType, Variant> = {
   },
 };
 
-export function StayIndicator({ type, name }: StayIndicatorProps) {
+export function StayIndicator({
+  type,
+  name,
+  onClick,
+  triggerRef,
+}: StayIndicatorProps) {
   const variant = VARIANTS[type];
   const display = name && name.trim().length > 0 ? name : "Accommodation";
+  const baseClass = `inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium ${variant.tone}`;
+
+  if (onClick) {
+    return (
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={onClick}
+        aria-label={`${variant.label(display)} — open details`}
+        className={`${baseClass} cursor-pointer transition-colors hover:brightness-95 dark:hover:brightness-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-900 dark:focus-visible:ring-zinc-300 focus-visible:ring-offset-1 focus-visible:ring-offset-white dark:focus-visible:ring-offset-zinc-900`}
+      >
+        {variant.icon}
+        <span className="truncate max-w-[24ch]">{variant.label(display)}</span>
+      </button>
+    );
+  }
+
   return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium ${variant.tone}`}
-    >
+    <span className={baseClass}>
       {variant.icon}
       <span className="truncate max-w-[24ch]">{variant.label(display)}</span>
     </span>
