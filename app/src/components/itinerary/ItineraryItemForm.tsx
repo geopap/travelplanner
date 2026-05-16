@@ -111,6 +111,7 @@ export function ItineraryItemForm({
             ? String(initialTransportation.cost)
             : "",
         currency: initialTransportation.currency ?? tripBaseCurrency,
+        flight_number: initialTransportation.flight_number ?? "",
       };
     }
     return emptyTransportFieldsValue(tripBaseCurrency);
@@ -239,6 +240,11 @@ export function ItineraryItemForm({
       tErrors.currency = "Enter a 3-letter ISO 4217 code.";
     }
 
+    const flightNumberTrimmed = transport.flight_number.trim();
+    if (flightNumberTrimmed.length > 16) {
+      tErrors.flight_number = "Flight number is too long (max 16).";
+    }
+
     if (Object.keys(tErrors).length > 0) {
       return { errors: tErrors };
     }
@@ -257,6 +263,13 @@ export function ItineraryItemForm({
     if (costNumber !== null) {
       payload.cost = costNumber;
       payload.currency = transport.currency;
+    }
+    // B-029 — only send flight_number when this is actually a flight AND the
+    // user typed something. The DB column persists across mode toggles, so
+    // for non-flight modes we deliberately leave it untouched on create. On
+    // patch the explicit null below handles the clear case.
+    if (transport.mode === "flight" && flightNumberTrimmed) {
+      payload.flight_number = flightNumberTrimmed;
     }
     return { payload, errors: tErrors };
   }
@@ -369,6 +382,9 @@ export function ItineraryItemForm({
             arrival_time: transportPayload.arrival_time ?? null,
             cost: transportPayload.cost ?? null,
             currency: transportPayload.currency ?? null,
+            // B-029 — explicit null clears the column when the user emptied
+            // the input or switched away from flight mode.
+            flight_number: transportPayload.flight_number ?? null,
           };
           body = {
             ...baseBody,

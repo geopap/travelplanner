@@ -14,8 +14,16 @@ interface BookmarkItemProps {
   role: MemberRole;
   /** google_place_id resolved by the page when available — falls back to place_id. */
   googlePlaceId?: string | null;
+  /** Passed through to the place detail link as `?trip=<uuid>` so the re-link pill (B-026) is discoverable. */
+  tripId?: string;
   onEdit: (bookmark: Bookmark) => void;
   onDelete: (bookmark: Bookmark) => void;
+  /**
+   * B-033 — Opens the "Add to Itinerary" dialog for this bookmark. Provided
+   * by `BookmarkList` (owner of dialog state + day list). Omitted on viewer
+   * paths; when undefined the button is not rendered.
+   */
+  onAddToItinerary?: (bookmark: Bookmark) => void;
 }
 
 const CATEGORY_LABELS: Record<BookmarkCategory, string> = {
@@ -40,20 +48,28 @@ export function BookmarkItem({
   bookmark,
   role,
   googlePlaceId,
+  tripId,
   onEdit,
   onDelete,
+  onAddToItinerary,
 }: BookmarkItemProps) {
   const canWrite = role !== "viewer";
+  // B-033 — Only show "Add to itinerary" when (a) the viewer can write AND
+  // (b) a parent supplied the handler AND (c) the bookmark resolves to a
+  // cached place row (we send `place_id` so the server can resolve the title).
+  const canAddToItinerary =
+    canWrite && Boolean(onAddToItinerary) && Boolean(bookmark.place_id);
   // Bookmarks imported from Trello before Google Places enrichment have
   // `place_id = null`. We fall back to the leading segment of `notes` for
   // a name and skip the place detail link.
   const fallbackName = bookmark.notes?.split(" — ")[0]?.trim() || "Untitled place";
   const placeName = bookmark.place?.name ?? fallbackName;
   const address = bookmark.place?.formatted_address ?? null;
+  const tripQuery = tripId ? `?trip=${encodeURIComponent(tripId)}` : "";
   const href = googlePlaceId
-    ? `/places/${encodeURIComponent(googlePlaceId)}`
+    ? `/places/${encodeURIComponent(googlePlaceId)}${tripQuery}`
     : bookmark.place_id
-      ? `/places/${encodeURIComponent(bookmark.place_id)}`
+      ? `/places/${encodeURIComponent(bookmark.place_id)}${tripQuery}`
       : null;
 
   return (
@@ -99,6 +115,17 @@ export function BookmarkItem({
         </div>
         {canWrite && (
           <div className="flex flex-col sm:flex-row gap-1.5 shrink-0">
+            {canAddToItinerary && onAddToItinerary && (
+              <button
+                type="button"
+                onClick={() => onAddToItinerary(bookmark)}
+                className="h-8 px-3 rounded-full border border-emerald-300 dark:border-emerald-800 text-xs font-medium text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                aria-label={`Add ${placeName} to itinerary`}
+                data-testid="bookmark-add-to-itinerary"
+              >
+                Add to itinerary
+              </button>
+            )}
             <button
               type="button"
               onClick={() => onEdit(bookmark)}

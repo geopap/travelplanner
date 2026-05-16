@@ -1,12 +1,16 @@
 // B-011 — Places (Bookmarks) tab for a trip.
+// B-038 — Adds the `planned: boolean` flag per bookmark (via the shared
+// trip-scoped helper) plus trip-wide All/Planned/NotPlanned split counts.
 //
 // Server component:
 //   1. Verifies the current user has at least viewer access to the trip
 //      (defense-in-depth on top of RLS).
-//   2. Loads up to 200 bookmarks for the trip with the joined slim place row.
+//   2. Loads up to 500 bookmarks for the trip with the joined slim place row
+//      AND a `planned` flag derived via the shared B-031/B-038 pairing rule.
 //   3. Resolves google_place_id per bookmark via a single batched query
 //      against `places` (avoids N+1).
-//   4. Hands off to the client `BookmarkList`, gated by the viewer's role.
+//   4. Computes trip-wide split counts (all / planned / not planned) once.
+//   5. Hands off to the client `BookmarkList`, gated by the viewer's role.
 
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
@@ -14,17 +18,13 @@ import { z } from "zod";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { checkTripAccess } from "@/lib/trip-access";
 import { BookmarkList } from "@/components/bookmarks/BookmarkList";
-import { EmptyState } from "@/components/EmptyState";
 import { secondaryButtonClass } from "@/components/ui/FormField";
-import {
-  BookmarkRowSchema,
-  mapBookmarkRow,
-} from "@/lib/validations/bookmarks";
+import { getBookmarksWithPlannedFlag } from "@/lib/bookmarks/pairing";
 
 export const metadata = { title: "Places · TravelPlanner" };
 export const dynamic = "force-dynamic";
 
-const LIMIT = 200;
+const LIMIT = 500;
 
 const PlaceIdRowSchema = z.object({
   id: z.string().uuid(),
@@ -50,29 +50,46 @@ export default async function TripPlacesPage({
   }
   const role = access.role;
 
-  // Direct Supabase query — RLS already restricts to trip members. We bound
-  // the result at LIMIT and join the slim place fields used by the UI.
-  const { data: bookmarksRaw, error } = await supabase
-    .from("bookmarks")
-    .select(
-      "id, trip_id, place_id, category, notes, added_by, created_at, updated_at, place:places(name, formatted_address, category, lat, lng)",
-    )
-    .eq("trip_id", tripId)
-    .order("created_at", { ascending: false })
-    .limit(LIMIT);
-
-  if (error) {
+  // B-038 — Trip-scoped fetch via the shared pairing helper. Two indexed
+  // round-trips (itinerary keys + bookmarks) + in-memory `isPaired`. Single
+  // source of truth for the OR predicate — never inline it here.
+  let bookmarksWithFlag: Awaited<
+    ReturnType<typeof getBookmarksWithPlannedFlag>
+  >;
+  try {
+    bookmarksWithFlag = await getBookmarksWithPlannedFlag(supabase, {
+      tripId,
+      limit: LIMIT,
+    });
+  } catch {
     throw new Error("bookmarks_fetch_failed");
   }
 
-  const parsedBookmarks = BookmarkRowSchema.array().safeParse(
-    bookmarksRaw ?? [],
-  );
-  if (!parsedBookmarks.success) {
-    throw new Error("bookmarks_parse_failed");
+  const atCap = bookmarksWithFlag.length === LIMIT;
+
+  // Trip-wide split counts — computed once server-side so the segmented
+  // control's labels are stable across re-renders. These are NOT affected by
+  // `?cat=` or `?plan=` filters (AC 6).
+  let plannedCount = 0;
+  for (const b of bookmarksWithFlag) {
+    if (b.planned) plannedCount += 1;
   }
-  const bookmarks = parsedBookmarks.data.map(mapBookmarkRow);
-  const atCap = bookmarks.length === LIMIT;
+  const totalCount = bookmarksWithFlag.length;
+  const notPlannedCount = totalCount - plannedCount;
+
+  // Strip `planned` off the wire shape passed to BookmarkList so the
+  // `Bookmark` contract is unchanged for downstream consumers — the flag is
+  // carried alongside in a parallel map keyed by bookmark id.
+  const plannedByBookmarkId: Record<string, boolean> = {};
+  const bookmarks = bookmarksWithFlag.map((b) => {
+    plannedByBookmarkId[b.id] = b.planned;
+    // Drop the helper-only fields (`planned`, `source_card_id`) from the
+    // domain object exposed to the client list.
+    const { planned: _planned, source_card_id: _src, ...rest } = b;
+    void _planned;
+    void _src;
+    return rest;
+  });
 
   // Single batched lookup of google_place_id per place_id used. Imported
   // bookmarks may have place_id = null (no Google Places enrichment yet).
@@ -119,47 +136,26 @@ export default async function TripPlacesPage({
         </Link>
       </header>
 
-      {bookmarks.length === 0 ? (
-        <EmptyState
-          icon={
-            <svg
-              aria-hidden="true"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              className="w-6 h-6"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-4-7 4V5z"
-              />
-            </svg>
-          }
-          title="No bookmarks yet"
-          message="Open a place's detail page to add one."
-          ctaLabel="Back to trip"
-          ctaHref={`/trips/${encodeURIComponent(tripId)}`}
-        />
-      ) : (
-        <>
-          {atCap && (
-            <p
-              role="status"
-              className="mb-4 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 p-3 text-xs text-amber-800 dark:text-amber-200"
-            >
-              Showing first {LIMIT} bookmarks. Refine via filters.
-            </p>
-          )}
-          <BookmarkList
-            tripId={tripId}
-            role={role}
-            initialBookmarks={bookmarks}
-            googlePlaceIdByPlaceId={googlePlaceIdByPlaceId}
-          />
-        </>
+      {atCap && (
+        <p
+          role="status"
+          className="mb-4 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 p-3 text-xs text-amber-800 dark:text-amber-200"
+        >
+          Showing first {LIMIT} bookmarks. Refine via filters.
+        </p>
       )}
+      <BookmarkList
+        tripId={tripId}
+        role={role}
+        initialBookmarks={bookmarks}
+        googlePlaceIdByPlaceId={googlePlaceIdByPlaceId}
+        plannedByBookmarkId={plannedByBookmarkId}
+        planSplitCounts={{
+          all: totalCount,
+          planned: plannedCount,
+          notPlanned: notPlannedCount,
+        }}
+      />
     </main>
   );
 }

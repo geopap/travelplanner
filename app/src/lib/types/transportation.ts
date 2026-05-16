@@ -20,6 +20,8 @@ export interface Transportation {
   cost: number | null;
   currency: string | null;
   notes: string | null;
+  /** B-029 — airline flight number for mode='flight' (e.g. "LX160"). Max 16 chars. */
+  flight_number: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -48,6 +50,7 @@ export interface TransportationInsertDTO {
   cost?: number;
   currency?: string;
   notes?: string;
+  flight_number?: string;
 }
 
 /** Patch DTO — values may be explicitly null to clear. */
@@ -62,6 +65,7 @@ export interface TransportationPatchDTO {
   cost?: number | null;
   currency?: string | null;
   notes?: string | null;
+  flight_number?: string | null;
 }
 
 /** Combined response from POST /items (transport variant). */

@@ -62,7 +62,7 @@ export async function GET(
     const { data, error, count } = await supabase
       .from('transportation')
       .select(
-        'id, itinerary_item_id, trip_id, mode, carrier, confirmation, departure_location, arrival_location, departure_time, arrival_time, cost, currency, notes, created_by, created_at, updated_at, item:itinerary_items!inner(id, day_id, title)',
+        'id, itinerary_item_id, trip_id, mode, carrier, confirmation, departure_location, arrival_location, departure_time, arrival_time, cost, currency, notes, flight_number, created_by, created_at, updated_at, item:itinerary_items!inner(id, day_id, title)',
         { count: 'exact' },
       )
       .eq('trip_id', id)

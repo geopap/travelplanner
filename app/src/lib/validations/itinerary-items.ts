@@ -27,7 +27,11 @@ const BaseCreateShape = {
   day_id: UuidSchema.nullable().optional(),
   start_time: IsoDateTimeSchema.nullable().optional(),
   end_time: IsoDateTimeSchema.nullable().optional(),
-  title: z.string().min(1).max(200),
+  // B-033 — `title` is optional on the wire when `place_id` is provided; the
+  // POST route resolves it from `places.name` server-side. Transport variant
+  // still requires a title (see TransportCreate below). Length validated when
+  // present.
+  title: z.string().min(1).max(200).optional(),
   external_url: z.string().url().nullable().optional(),
   notes: z.string().max(5000).nullable().optional(),
   // B-015: optional link to a cached `places` row. FK existence is enforced
@@ -54,6 +58,9 @@ const NonTransportCreateBase = z
 const TransportCreate = z
   .object({
     ...BaseCreateShape,
+    // Transport always requires a client-supplied title (no server-side
+    // resolution path — there's no place to draw the title from).
+    title: z.string().min(1).max(200),
     type: z.literal('transport'),
     cost: z.undefined().optional(),
     currency: z.undefined().optional(),

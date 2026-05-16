@@ -110,6 +110,7 @@ function defaultTransportRow() {
     cost: null,
     currency: null,
     notes: null,
+    flight_number: null,
     created_by: FIXED_USER_ID,
     created_at: '2026-04-01T00:00:00Z',
     updated_at: '2026-04-01T00:00:00Z',

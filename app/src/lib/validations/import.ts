@@ -30,23 +30,43 @@ export const ImportSourceType = z.enum(['youtube', 'twitter', 'web', 'text']);
 export type ImportSourceTypeT = z.infer<typeof ImportSourceType>;
 
 /**
- * Extract input — exactly one of source_url, raw_text must be present.
+ * Extract input — three mutually exclusive variants (B-035 added the third):
+ *   1. URL-only:                 { source_url }
+ *   2. Caption-only:             { raw_text }
+ *   3. Caption + stashed URL:    { raw_text, stashed_source_url }
+ *      (B-035) when the user pastes an Instagram/TikTok URL the FE detects
+ *      the unsupported host, asks them to switch to caption mode, and posts
+ *      both the caption AND the original URL so the import_sources row
+ *      retains the link as a reference (no live fetch is attempted).
+ *
  * Empty strings are not allowed; URLs must parse.
  */
-export const ExtractInput = z
-  .object({
-    source_url: z.string().url().max(2048).optional(),
-    raw_text: z.string().min(1).max(20_000).optional(),
-  })
-  .refine(
-    (v) =>
-      (v.source_url !== undefined && v.raw_text === undefined) ||
-      (v.source_url === undefined && v.raw_text !== undefined),
-    {
-      message: 'Provide exactly one of source_url or raw_text',
-      path: ['source_url'],
-    },
-  );
+const ExtractInputUrl = z.object({
+  source_url: z.string().url().max(2048),
+  raw_text: z.undefined().optional(),
+  stashed_source_url: z.undefined().optional(),
+});
+
+const ExtractInputText = z.object({
+  raw_text: z.string().min(1).max(20_000),
+  source_url: z.undefined().optional(),
+  stashed_source_url: z.undefined().optional(),
+});
+
+export const ExtractInputCaptionWithUrl = z.object({
+  raw_text: z.string().min(1).max(20_000),
+  stashed_source_url: z.string().url().max(2048),
+  source_url: z.undefined().optional(),
+});
+export type ExtractInputCaptionWithUrlT = z.infer<
+  typeof ExtractInputCaptionWithUrl
+>;
+
+export const ExtractInput = z.union([
+  ExtractInputUrl,
+  ExtractInputText,
+  ExtractInputCaptionWithUrl,
+]);
 export type ExtractInputT = z.infer<typeof ExtractInput>;
 
 /**

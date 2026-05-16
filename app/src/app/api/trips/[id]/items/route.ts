@@ -257,6 +257,37 @@ export async function POST(
     // structurally by the discriminated-union schema (transport variant
     // forbids `cost`/`currency` on the parent; other variants forbid
     // `transportation`).
+    //
+    // B-033 — `title` is optional in the schema when `place_id` is provided.
+    // Resolve from `places.name` so the "Add to Itinerary" entry points can
+    // omit a title. If neither is present, reject. `places` is readable by any
+    // authenticated user (per 0004_places.sql).
+    let resolvedTitle: string | null = input.title ?? null;
+    if (!resolvedTitle) {
+      // R4 Sec-M-1: keep a SINGLE generic message across both 400 branches
+      // (no place_id supplied, OR place_id supplied but no cached row) so
+      // response bodies don't enable enumeration of the cached `places` set.
+      if (!input.place_id) {
+        return badRequest('title is required');
+      }
+      const { data: placeRow, error: placeErr } = await supabase
+        .from('places')
+        .select('name')
+        .eq('id', input.place_id)
+        .maybeSingle();
+      if (placeErr) return serverError();
+      const placeName =
+        placeRow && typeof placeRow.name === 'string'
+          ? placeRow.name.trim()
+          : '';
+      if (!placeName) {
+        return badRequest('title is required');
+      }
+      // Honor the same 1..200 length bound the schema enforces for client-sent
+      // titles (cached `places.name` is bounded by Google Places — defensive).
+      resolvedTitle = placeName.slice(0, 200);
+    }
+
     const { data, error } = await supabase
       .from('itinerary_items')
       .insert({
@@ -265,7 +296,7 @@ export async function POST(
         type: input.type,
         start_time: input.start_time ?? null,
         end_time: input.end_time ?? null,
-        title: input.title,
+        title: resolvedTitle,
         external_url: input.external_url ?? null,
         notes: input.notes ?? null,
         cost: input.cost ?? null,

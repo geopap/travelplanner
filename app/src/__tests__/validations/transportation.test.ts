@@ -87,9 +87,41 @@ describe('TransportationCreate', () => {
     expect(
       TransportationCreate.safeParse({
         mode: 'flight',
-        flight_number: 'AB123',
+        unknown_field: 'AB123',
       }).success,
     ).toBe(false);
+  });
+
+  // B-029 — flight_number is a first-class optional field on create.
+  it('B-029: accepts flight_number on flight', () => {
+    expect(
+      TransportationCreate.safeParse({
+        mode: 'flight',
+        flight_number: 'LX160',
+      }).success,
+    ).toBe(true);
+  });
+  it('B-029: rejects flight_number longer than 16 chars', () => {
+    const r = TransportationCreate.safeParse({
+      mode: 'flight',
+      flight_number: 'A'.repeat(17),
+    });
+    expect(r.success).toBe(false);
+  });
+  it('B-029: trims surrounding whitespace on flight_number', () => {
+    const r = TransportationCreate.safeParse({
+      mode: 'flight',
+      flight_number: '  LX160  ',
+    });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.flight_number).toBe('LX160');
+  });
+  it('B-029: rejects empty flight_number after trim', () => {
+    const r = TransportationCreate.safeParse({
+      mode: 'flight',
+      flight_number: '   ',
+    });
+    expect(r.success).toBe(false);
   });
 });
 
@@ -113,6 +145,21 @@ describe('TransportationPatch', () => {
   it('rejects extra field', () => {
     expect(
       TransportationPatch.safeParse({ unknown: true }).success,
+    ).toBe(false);
+  });
+  it('B-029: allows nulling flight_number on patch', () => {
+    expect(
+      TransportationPatch.safeParse({ flight_number: null }).success,
+    ).toBe(true);
+  });
+  it('B-029: accepts flight_number value on patch', () => {
+    expect(
+      TransportationPatch.safeParse({ flight_number: 'LX160' }).success,
+    ).toBe(true);
+  });
+  it('B-029: rejects flight_number > 16 chars on patch', () => {
+    expect(
+      TransportationPatch.safeParse({ flight_number: 'A'.repeat(17) }).success,
     ).toBe(false);
   });
 });
@@ -195,6 +242,7 @@ describe('TransportationRowSchema — round-trip', () => {
       cost: 250,
       currency: 'EUR',
       notes: null,
+      flight_number: 'LX160',
       created_by: '00000000-0000-4000-8000-000000000001',
       created_at: '2026-04-01T00:00:00Z',
       updated_at: '2026-04-01T00:00:00Z',
@@ -218,6 +266,7 @@ describe('TransportationRowSchema — round-trip', () => {
       cost: null,
       currency: null,
       notes: null,
+      flight_number: null,
       created_by: null,
       created_at: '2026-04-01T00:00:00Z',
       updated_at: '2026-04-01T00:00:00Z',
