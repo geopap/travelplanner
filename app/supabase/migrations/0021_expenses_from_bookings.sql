@@ -77,10 +77,10 @@ as $$
     p_creator,
     (select user_id from public.trip_members
       where trip_id = p_trip_id and role = 'owner'
-      order by created_at asc limit 1),
+      order by invited_at asc limit 1),
     (select user_id from public.trip_members
       where trip_id = p_trip_id
-      order by created_at asc limit 1)
+      order by invited_at asc limit 1)
   );
 $$;
 
