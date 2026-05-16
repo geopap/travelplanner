@@ -11,6 +11,7 @@ import { ItineraryItemCard } from "./ItineraryItemCard";
 import { StayIndicator } from "@/components/accommodations/StayIndicator";
 import { AccommodationDetailModal } from "@/components/accommodations/AccommodationDetailModal";
 import { DayMapSection } from "@/components/map/DayMapSection";
+import { DayBookmarksSection } from "./DayBookmarksSection";
 
 interface DayCardProps {
   day: TripDay;
@@ -299,6 +300,10 @@ export function DayCard({
             + Add accommodation for this day
           </button>
         )}
+
+        {/* B-031 — "Bookmarks for this day" passive section. Sits between
+            the itinerary list and the map block. Hidden when N=0. */}
+        <DayBookmarksSection tripId={day.trip_id} dayId={day.id} />
 
         {/* B-015 / B-023 — Day-view map. Read-only for all roles.
             DayMapSection fetches `/days/[dayId]/map` itself (items +

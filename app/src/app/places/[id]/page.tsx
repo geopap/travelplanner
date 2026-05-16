@@ -142,9 +142,13 @@ export default async function PlaceDetailPage({
   // B-026 — When `?trip=<uuid>` is present, look up the caller's role on
   // that trip. Only owner/editor see the "Re-link" pill; non-members or
   // missing rows fall through with no leak (the pill simply stays hidden).
+  // B-032 — In the same trip context (any role, viewer included), also fetch
+  // the dated days this place is scheduled on so the header can render
+  // "Planned on dd.mm.yyyy" chips.
   let tripId: string | undefined;
   let canRelink = false;
   let fromPlaceId: string | undefined;
+  let plannedDays: PlannedDay[] = [];
   if (user && tripIdParam) {
     const { data: memberRow } = await supabase
       .from("trip_members")
@@ -154,7 +158,8 @@ export default async function PlaceDetailPage({
       .maybeSingle();
     const role =
       memberRow && typeof memberRow.role === "string" ? memberRow.role : null;
-    if (role === "owner" || role === "editor") {
+    const isMember = role === "owner" || role === "editor" || role === "viewer";
+    if (isMember) {
       const { data: placeRow } = await supabase
         .from("places")
         .select("id")
@@ -163,9 +168,16 @@ export default async function PlaceDetailPage({
       const placeUuid =
         placeRow && typeof placeRow.id === "string" ? placeRow.id : null;
       if (placeUuid) {
-        tripId = tripIdParam;
-        canRelink = true;
-        fromPlaceId = placeUuid;
+        if (role === "owner" || role === "editor") {
+          tripId = tripIdParam;
+          canRelink = true;
+          fromPlaceId = placeUuid;
+        }
+        plannedDays = await fetchPlannedDays(
+          supabase,
+          tripIdParam,
+          placeUuid,
+        );
       }
     }
   }
@@ -177,6 +189,72 @@ export default async function PlaceDetailPage({
       tripId={tripId}
       canRelink={canRelink}
       fromPlaceId={fromPlaceId}
+      tripContextId={user && tripIdParam ? tripIdParam : undefined}
+      plannedDays={plannedDays}
     />
   );
+}
+
+// B-032 — Distinct dated days this place appears on, ordered chronologically.
+// Uses the (trip_id, place_id WHERE place_id IS NOT NULL) partial index from
+// migration 0023 (`itinerary_items_trip_place_idx`). Single bounded query: a
+// PostgREST embedded select against `itinerary_items` with `trip_days` joined
+// in one round-trip, then de-duped + sorted in memory (typical N is ≤ 30).
+export interface PlannedDay {
+  dayNumber: number;
+  /** Pre-formatted dd.mm.yyyy date string for the chip label. */
+  formattedDate: string;
+}
+
+interface ItineraryDayJoin {
+  day_id: string;
+  trip_days: { id: string; day_number: number; date: string } | null;
+}
+
+const PLANNED_DATE_FMT = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+});
+
+function formatPlannedDate(isoDate: string): string {
+  // `date` columns arrive as 'YYYY-MM-DD'; parse as a calendar date (UTC) so
+  // local-tz drift never shifts the displayed day. en-GB returns dd/mm/yyyy;
+  // we replace `/` with `.` per house style.
+  const [y, m, d] = isoDate.split("-").map((p) => Number.parseInt(p, 10));
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
+    return isoDate;
+  }
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return PLANNED_DATE_FMT.format(dt).replace(/\//g, ".");
+}
+
+async function fetchPlannedDays(
+  supabase: Awaited<ReturnType<typeof getSessionUser>>["supabase"],
+  tripId: string,
+  placeUuid: string,
+): Promise<PlannedDay[]> {
+  const { data, error } = await supabase
+    .from("itinerary_items")
+    .select("day_id, trip_days!inner(id, day_number, date)")
+    .eq("trip_id", tripId)
+    .eq("place_id", placeUuid);
+  if (error || !data) return [];
+  const seen = new Map<string, { dayNumber: number; date: string }>();
+  for (const row of data as unknown as ItineraryDayJoin[]) {
+    const td = row.trip_days;
+    if (!td || typeof td.id !== "string") continue;
+    if (typeof td.day_number !== "number" || typeof td.date !== "string") {
+      continue;
+    }
+    if (!seen.has(td.id)) {
+      seen.set(td.id, { dayNumber: td.day_number, date: td.date });
+    }
+  }
+  return Array.from(seen.values())
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((d) => ({
+      dayNumber: d.dayNumber,
+      formattedDate: formatPlannedDate(d.date),
+    }));
 }

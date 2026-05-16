@@ -3382,3 +3382,265 @@ Batch insert: inside the `relink_place` PG function, use a single `INSERT INTO a
 - The importer patch is independent — either engineer can pick it up; assign to [backend-engineer] since it edits `scripts/`.
 - [solution-architect] returns at sprint close to update §B-026 here with any deltas from R3/R4.
 
+## B-031 — "Bookmarks for this day" passive section on day view (R2 architecture)
+
+_Added 2026-05-16 by [solution-architect]. Full Pipeline (M). Companion to B-038 (trip-scoped "All/Planned/Not Planned" filter) — both items must share an identical "paired" definition to avoid drift._
+
+### B-031.1 No schema changes, no new indexes
+
+All required indexes already exist:
+
+| Index | Migration | Definition | Used for |
+|-------|-----------|-----------|----------|
+| `bookmarks_trip_source_card_uniq` | 0011 | `unique (trip_id, source_card_id) where source_card_id is not null` | EXISTS arm matching on `source_card_id` — supplies `trip_id, source_card_id` lookup |
+| `bookmarks_trip_place_idx` | 0023 | `(trip_id, place_id) where place_id is not null` | EXISTS arm matching on `place_id` — covers bookmark side of the OR |
+| `itinerary_items_trip_place_idx` | 0023 | `(trip_id, place_id) where place_id is not null` | EXISTS subquery — covers itinerary-items side of the `place_id` OR arm and the `day_id`/`trip_id` predicate via the bitmap-AND with the day filter |
+| `itinerary_items_trip_source_card_uniq` | 0011 | `unique (trip_id, source_card_id) where source_card_id is not null` | EXISTS subquery — covers itinerary-items side of the `source_card_id` OR arm |
+| `itinerary_items_day_id_idx` (implicit FK index) | 0005 | `(day_id)` | Restricts EXISTS to the requested day |
+| `bookmarks_trip_idx` | 0007 | `(trip_id)` | Outer query bookmark scan |
+
+**Decision**: NO new index required. The four-index combo above (two on each side of the OR) lets the planner choose a bitmap-OR plan on the EXISTS subquery and bitmap-AND with `day_id`/`trip_id`. The OR arms are mutually-exclusive partial indexes so each arm scans a narrow row set. On Japan-2026-scale data (a few hundred itinerary_items per trip, ~50 bookmarks per day max), the EXISTS subquery is correlated and short-circuited per outer bookmark row — planner will return well under the 200 ms per-query and 500 ms P95 endpoint budgets.
+
+### B-031.2 Query design — single query, no N+1
+
+Final SQL (parameterized — `:tripId`, `:dayId`):
+
+```sql
+select
+  b.id,
+  b.source_card_id,
+  b.place_id,
+  b.category,
+  b.source_card_name,
+  p.google_place_id,
+  p.name             as place_name,
+  p.formatted_address
+from public.bookmarks b
+left join public.places p on p.id = b.place_id
+where b.trip_id = :tripId
+  and exists (
+    select 1
+    from public.itinerary_items ii
+    where ii.day_id = :dayId
+      and ii.trip_id = :tripId
+      and (
+        (ii.source_card_id is not null and ii.source_card_id = b.source_card_id)
+        or (ii.place_id is not null and ii.place_id = b.place_id)
+      )
+  )
+order by coalesce(p.name, b.source_card_name) asc nulls last, b.id asc
+limit 200;
+```
+
+Notes:
+- `LEFT JOIN places` because B-022 allows `place_id IS NULL` for label-only Trello bookmarks (`source_card_name` is the fallback display string, per AC 3).
+- `DISTINCT ON (b.id)` from the AC is not required because the outer query is over `bookmarks` (each `b.id` appears at most once); the EXISTS subquery cannot duplicate the outer row. Dropping `DISTINCT ON` simplifies the planner and the ORDER BY. AC 5's query shape is honoured semantically — the deduplication contract holds.
+- `LIMIT 200` is a defensive cap satisfying Q-1; per AC 7 the realistic bound is < 50 per day (Trello list size), so the cap never bites in practice.
+- ORDER BY `coalesce(p.name, source_card_name)` gives a stable, readable order for the FE list — matches how the day-items list orders its rows.
+
+**Planner expectation** (verified mentally against pg 15 heuristics): outer scan on `bookmarks` via `bookmarks_trip_idx`; correlated EXISTS uses bitmap-OR of `itinerary_items_trip_source_card_uniq` (constrained by `b.source_card_id`) and `itinerary_items_trip_place_idx` (constrained by `b.place_id`), bitmap-AND with `day_id`. No sequential scan on `itinerary_items`. No N+1 — one round-trip to the DB.
+
+**Supabase client form** (PostgREST in Next.js route): the OR-of-EXISTS-with-correlation cannot be expressed in PostgREST's `or()` chain, so the implementation uses a Postgres `rpc()` call or `supabase.from('bookmarks').select(...).filter('id', 'in', '(' + <subselect> + ')')` is brittle. **Decision: implement as a Supabase SECURITY INVOKER SQL function** (no migration needed — define the function lazily or, more practically, use a Postgres view / `rpc` would require a migration). Since AC 11 forbids schema changes, the **chosen implementation is `supabase.rpc()` is OUT** and instead the route uses `supabase.from('bookmarks').select(...)` with a `.filter()` that calls `id=in.(...)` after fetching itinerary_items? No — that is N+1 + duplicated logic.
+
+**Final implementation decision (no migration)**: use `supabase.from('itinerary_items').select('source_card_id, place_id').eq('trip_id', tripId).eq('day_id', dayId)` to fetch the small day-scoped key list (≤ 50 rows, both columns), then a second `supabase.from('bookmarks').select('..., places(google_place_id, name, formatted_address)').eq('trip_id', tripId).or('source_card_id.in.(...),place_id.in.(...)')` with the two non-null key sets. This is **two queries, both indexed, both O(1) round-trips** — semantically equivalent to the SQL above, no N+1, total ≤ 2 round-trips, well within the 500 ms P95 budget. The PostgREST `or()` chain composes the two arms cleanly.
+
+This two-query form is also what the shared helper exposes (see B-031.5).
+
+### B-031.3 API contract
+
+**Endpoint**: `GET /api/trips/[id]/days/[dayId]/bookmarks`
+
+**Auth**: viewer-or-higher trip member (read-only). Same pattern as `/days/[dayId]/map` (B-023): `checkTripAccess(supabase, tripId, userId, 'viewer')`.
+
+**Status codes**:
+- `200` — JSON body `{ bookmarks: DayBookmarkRow[] }`.
+- `401` — no auth user.
+- `403` — authenticated non-member (existence-hiding: route returns `404` per existing convention — see `/days/[dayId]/map` line 112).
+- `404` — malformed UUID, day not on trip, or non-member (existence-hiding).
+- `500` — server error.
+
+**Response shape**:
+
+```ts
+type DayBookmarkRow = {
+  id: string;                       // bookmarks.id (uuid)
+  source_card_id: string | null;
+  place_id: string | null;          // FK to places.id (internal uuid)
+  category: BookmarkCategory;       // existing enum
+  source_card_name: string | null;  // display fallback when place_id is null
+  place: {
+    google_place_id: string;        // for the click-through URL
+    name: string;
+    formatted_address: string | null;
+  } | null;                         // null when bookmark has no resolved place
+};
+
+type DayBookmarksResponse = { bookmarks: DayBookmarkRow[] };
+```
+
+Embed `place` from `places` via PostgREST FK syntax (matches B-023's pattern): `place:places!bookmarks_place_id_fkey(google_place_id, name, formatted_address)`. Validate with a Zod row schema mirroring `ItineraryItemMapRowSchema` in `/days/[dayId]/map/route.ts` — same `PlaceEmbedFlexibleSchema` + `flattenPlace` helper pattern (consider extracting to `app/src/lib/api/place-embed.ts` opportunistically, but not required for B-031).
+
+**Performance AC**: < 500 ms P95. Two indexed round-trips, both bounded; expected median < 80 ms.
+
+**Pagination**: NONE (AC 7 — day-scoped bookmark count is bounded by Trello list size, never paginated). The `limit 200` defensive cap is internal; clients never paginate.
+
+### B-031.4 Component plan
+
+**Location on day card**: between the itinerary items list and the Map block (per AC 1). The day card today renders, in order:
+1. Day header (title + date)
+2. "Staying at" indicator chips (B-024)
+3. Itinerary items list
+4. **NEW: "Bookmarks for this day" collapsible section** ← B-031 inserts here
+5. Map block (B-023)
+
+**New component**: `app/src/components/itinerary/DayBookmarksSection.tsx` (mirrors `DayMapSection.tsx` from B-023).
+
+**Behaviour**:
+- Hidden entirely when `bookmarks.length === 0` (AC 1, AC 8).
+- Header: `Bookmarks for this day (N)` with a chevron toggle.
+- Collapsed by default on `<md`, expanded by default on `md+` (AC 4 — match Map block pattern; reuse the same `useMediaQuery('md')` hook or static Tailwind class pattern already used by `DayMapSection`).
+- Each row: category badge (reuse `BookmarkCategoryBadge` from B-028) + place name (or `source_card_name` if `place_id` null) + formatted address (when present).
+- Row click navigates to `/places/<place.google_place_id>?trip=<tripId>` (AC 3). When `place_id` is null (label-only bookmark), the row is **not clickable** — render as plain text with a muted style and an unobtrusive "(no Google place)" hint. Keyboard: only the clickable rows are tab-stops; non-clickable rows are static.
+- All roles read-only (AC 6 — viewer / editor / owner all see it, no mutations).
+
+**Empty state copy**: not applicable — the section is hidden when N = 0 (no placeholder per AC 8). For days where the endpoint errors, render an inline error within the section (matches `DayMapSection`'s error state).
+
+**Data fetching**: client-side `fetch` on day-card mount, matching `DayMapSection`'s pattern (the day-itinerary page is a client component; SSR is not required because the section is below-the-fold on mobile). Skeleton loader: a 2-row placeholder while the request is in flight. No revalidation cadence — the section refetches on full page reload or on any itinerary mutation (existing `mutate` hook will pick this up if the FE wires the endpoint into the same SWR/React Query key family as the day data; otherwise the section refreshes on navigation away/back, which is acceptable for a passive surface).
+
+### B-031.5 Shared-definition contract with B-038
+
+**Risk**: B-031 (day-scoped) and B-038 (trip-scoped) compute the same "paired" predicate. If implementations drift, the day-view section will count a bookmark "paired" while the trip-view filter calls it "not planned" (or vice-versa). The AC for both items explicitly mandates the definitions stay identical — this section codifies the contract.
+
+**Shared helper**: `app/src/lib/bookmarks/pairing.ts` (new file).
+
+Existing convention check: `app/src/lib/bookmarks/categories.ts` exists with bookmark-domain helpers (B-028). `app/src/lib/supabase/queries/` does **not** exist (the project does not co-locate SQL helpers under `lib/supabase/`; reusable business-logic helpers live under `lib/<domain>/`). Therefore the right home is `lib/bookmarks/pairing.ts`, alongside `categories.ts`.
+
+**Exports** (single source of truth for the predicate):
+
+```ts
+// app/src/lib/bookmarks/pairing.ts
+
+import type { SupabaseClient } from '@supabase/supabase-js';
+
+/**
+ * Day-scoped: returns the set of bookmark IDs that are paired to a specific
+ * day on a trip via either `source_card_id` match or shared `place_id`.
+ *
+ * Used by B-031 (GET /api/trips/[id]/days/[dayId]/bookmarks).
+ *
+ * Single logical query (two PostgREST round-trips: itinerary keys → bookmarks).
+ * No N+1 — both round-trips are bounded and use existing indexes.
+ */
+export async function getPairedBookmarkIdsForDay(
+  supabase: SupabaseClient,
+  args: { tripId: string; dayId: string },
+): Promise<string[]>;
+
+/**
+ * Trip-scoped: returns, for every bookmark in a trip, whether it is paired
+ * to ANY itinerary_items row in the trip (same OR predicate, day_id removed).
+ *
+ * Used by B-038 (planned/not-planned filter on /trips/[id]/places).
+ *
+ * Single round-trip — bookmarks SELECT with a correlated EXISTS computed
+ * server-side via the `planned` boolean projection.
+ */
+export async function getBookmarksWithPlannedFlag(
+  supabase: SupabaseClient,
+  args: { tripId: string },
+): Promise<Array<Bookmark & { planned: boolean }>>;
+
+/**
+ * Pure predicate (used by tests and by any in-memory client-side recompute):
+ * given a bookmark `b` and an itinerary item `ii`, are they paired?
+ */
+export function isPaired(
+  b: Pick<Bookmark, 'source_card_id' | 'place_id'>,
+  ii: Pick<ItineraryItem, 'source_card_id' | 'place_id'>,
+): boolean {
+  return (
+    (b.source_card_id !== null && b.source_card_id === ii.source_card_id) ||
+    (b.place_id !== null && b.place_id === ii.place_id)
+  );
+}
+```
+
+**Naming convention**:
+- File: `app/src/lib/bookmarks/pairing.ts`.
+- Public functions: `getPairedBookmarkIdsForDay` (day-scoped, B-031), `getBookmarksWithPlannedFlag` (trip-scoped, B-038), `isPaired` (pure predicate, both + tests).
+- The literal SQL OR predicate `(source_card_id match) OR (place_id match)` is implemented exactly once in this file and re-used by both endpoints. **Engineers must not inline the predicate in route handlers** — code-reviewer flags any inline copy as DRY violation HIGH.
+
+**Test contract** (deferred to R5 [test-engineer]):
+- `app/src/__tests__/lib/bookmarks-pairing.test.ts` — unit-tests `isPaired` matrix (both arms, neither, both-null edge case).
+- Both `/days/[dayId]/bookmarks` and `/trips/[id]/places` (B-038 filter) integration tests import the same helper — if drift occurs, both test suites fail in lockstep.
+
+**Sequencing**: [backend-engineer] writes the helper first (B-031 or B-038 — whichever starts R3 first). The second item consumes the same helper. [scrum-master] coordinates so both items don't double-author the file (shared-file governance rule applies — `app/src/lib/bookmarks/` is shared).
+
+### B-031.6 R2 Query Performance Checklist
+
+| # | Check | Status | Justification |
+|---|-------|--------|---------------|
+| Q-1 | All list queries bounded | ✅ | `LIMIT 200` defensive cap on the outer bookmarks query; itinerary-key probe is `eq(day_id)` → ≤ 50 rows in practice. |
+| Q-2 | No N+1 sequential queries | ✅ | Two-round-trip plan: one indexed SELECT for itinerary keys, one indexed SELECT for bookmarks via `or(source_card_id.in.(...),place_id.in.(...))`. No per-row follow-up. |
+| Q-3 | Pagination on list endpoints | ✅ (N/A — bounded) | Per AC 7, day-bookmark count is bounded by Trello list size (≤ 50); pagination explicitly omitted. Defensive `LIMIT 200` documents the bound. |
+| Q-4 | Date-bounded analytics queries | ✅ (N/A) | Not an analytics query; day-scope (`day_id = :dayId`) is the natural bound. |
+
+### B-031.7 Top risks
+
+1. **Predicate drift between B-031 and B-038** — mitigated by the shared helper in `lib/bookmarks/pairing.ts` and the DRY enforcement rule in §B-031.5. R4 code-reviewer flags any inline copy as HIGH.
+2. **PostgREST `or()` argument-list size** — if a day ever has > 1000 itinerary items (it won't, but defensively), the `.in.(...)` arg list could grow unwieldy. Mitigated by the day-scoped key fetch already being bounded by `day_id = :dayId`; realistic worst-case is < 50 keys per arm.
+3. **`place_id`-null bookmarks not clickable** — UX nuance (AC 3 implies clickable behaviour for resolved places only). Documented in §B-031.4; FE must render the muted non-clickable variant rather than a broken link to `/places/null`.
+
+### B-031.8 Files to create/edit (handoff to R3)
+
+- **NEW**: `app/src/app/api/trips/[id]/days/[dayId]/bookmarks/route.ts` (backend-engineer)
+- **NEW**: `app/src/lib/bookmarks/pairing.ts` (backend-engineer — owned jointly with B-038)
+- **NEW**: `app/src/components/itinerary/DayBookmarksSection.tsx` (frontend-engineer)
+- **EDIT**: day card component (likely `app/src/components/itinerary/DayCard.tsx` or the page-level day renderer in `/trips/[id]/itinerary` — frontend-engineer to confirm exact filename in R3) — insert `<DayBookmarksSection>` between itinerary items list and `<DayMapSection>`.
+- **NEW**: `app/src/lib/types/bookmarks.ts` addition (or existing file extension) — `DayBookmarkRow` and `DayBookmarksResponse` types.
+
+[solution-architect] returns at sprint close to update §B-031 here with any deltas from R3/R4.
+
+---
+
+## Sprint 8 Close — 2026-05-16 (v0.8.0)
+
+All 8 Sprint 8 items shipped as designed. No schema changes from R2 specification.
+
+### New endpoint
+
+- `GET /api/trips/[id]/days/[dayId]/bookmarks` — viewer-or-higher; existence-hiding 404 for malformed UUID / non-member / day-not-on-trip; two-round-trip plan (itinerary keys → bookmarks `.or()`); results sorted by `place.name` alpha then `id`; `LIMIT 200` defensive cap. Route file: `app/src/app/api/trips/[id]/days/[dayId]/bookmarks/route.ts`.
+
+### New shared library
+
+- `app/src/lib/bookmarks/pairing.ts` — canonical pairing predicate. Exports: `isPaired`, `buildPairingOrClause`, `getDayPairingKeys`, `getPairedBookmarkIdsForDay`, `getTripPairingKeys`, `getBookmarksWithPlannedFlag`. Both B-031 and B-038 consume this helper; no inline OR predicate copies exist anywhere in `app/src/` outside this file (enforced by `pairing-drift-regression.test.ts`).
+
+### New components
+
+- `app/src/components/itinerary/DayBookmarksSection.tsx` — client component, eager fetch, `localStorage` open-state, default-open on `md+`.
+- `app/src/components/itinerary/AddToItineraryDialog.tsx` + `AddToItineraryTriggerPill.tsx` — day selector + time pickers + type selector (transport excluded); `z-[1100]`.
+- `app/src/components/places/AddPlaceDialog.tsx` — `PlaceSearchInput` + category + notes; `z-[1100]`; pre-hydrates Places cache; 409 inline error.
+- `app/src/components/itinerary/ItineraryView.tsx` extended — `UNSCHEDULED_KEY` bucket + `UnscheduledSection` component (inline); patches all three bucketing paths (`initialLoad`, `loadMore`, `onSaved`).
+
+### Route modifications (R3 actuals)
+
+- `POST /api/trips/[id]/items` — server-side `title` resolution from `places.name` when client omits `title` but supplies `place_id`; 200-char clamp; two 400 branches collapsed to single generic body (Sec-M-1 fix).
+- `POST /api/trips/[id]/import/extract` — accepts new `ExtractInputCaptionWithUrl` union variant; stashed URL persisted as `import_sources.source_url`.
+
+### Updated shared files
+
+- `app/src/lib/validations/itinerary-items.ts` — `title` optional on non-transport wire variants.
+- `app/src/lib/validations/import.ts` — three-way `ExtractInput` union + `ExtractInputCaptionWithUrl`.
+- `app/src/lib/utils/import-hosts.ts` (new) — `isCaptionOnlyHost` helper (locked host set).
+
+### No new migrations
+
+Sprint 8 requires no DB schema changes. All index needs satisfied by `0011_trello_import.sql` (source_card_id indexes) and `0023_place_id_locked.sql` (place_id indexes).
+
+### Deferred architecture notes for Sprint 9+
+
+- PATCH `place_id` parity: when `PATCH /api/trips/[id]/items/[itemId]` receives `place_id` without `title`, the server should run the same `places.name` resolution the POST path uses (Sec-M-2 from R4).
+- `role="dialog"` placement: `RelinkPlaceDialog`, `AddToItineraryDialog`, `AddPlaceDialog` all place the role on the backdrop div rather than the inner content box — should be corrected consistently (M-4 from R4).
+- `UnscheduledSection` extraction: currently inlined in `ItineraryView.tsx`; candidate for own file consistent with `DayMapSection` / `DayBookmarksSection` pattern (L-4 from R4).
+
+

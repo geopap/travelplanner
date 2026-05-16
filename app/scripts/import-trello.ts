@@ -86,6 +86,8 @@ interface CliArgs {
   userEmail: string;
   dryRun: boolean;
   backfill: boolean;
+  diagnose: boolean;
+  tripId: string | null;
 }
 
 export interface Summary {
@@ -110,6 +112,8 @@ export function parseArgs(argv: readonly string[]): CliArgs {
   let userEmail: string | null = null;
   let dryRun = false;
   let backfill = false;
+  let diagnose = false;
+  let tripId: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--user-email') {
@@ -123,12 +127,23 @@ export function parseArgs(argv: readonly string[]): CliArgs {
       dryRun = true;
     } else if (a === '--backfill') {
       backfill = true;
+    } else if (a === '--diagnose') {
+      // B-030: read-only per-day diagnostic. No writes — does not require
+      // service-role privileges to read either, but uses the same client.
+      diagnose = true;
+    } else if (a === '--trip-id') {
+      const v = argv[i + 1];
+      if (!v) throw new Error('--trip-id requires a value');
+      tripId = v;
+      i++;
+    } else if (a?.startsWith('--trip-id=')) {
+      tripId = a.slice('--trip-id='.length);
     }
   }
   if (!userEmail) {
     throw new Error('Missing required --user-email <email>');
   }
-  return { userEmail, dryRun, backfill };
+  return { userEmail, dryRun, backfill, diagnose, tripId };
 }
 
 // ---------------------------------------------------------------------------
@@ -982,6 +997,166 @@ async function runBackfill(
 }
 
 // ---------------------------------------------------------------------------
+// B-030: diagnostic — read-only per-day comparison of bookmarks vs. paired
+// itinerary_items for the live trip. NO writes. Used to pick Branch A / B / C
+// per the locked AC decision rules before any --backfill is invoked.
+//
+// Note: `bookmarks` has no `source_list_date` column — the AC's reference SQL
+// was illustrative. The canonical date source is the Trello export (via the
+// card's `idList` → `listDateById`). We therefore compute per-date counts in
+// the script: walk Trello cards to build cardId → date, then aggregate
+// bookmark and itinerary_item counts grouped by that date.
+// ---------------------------------------------------------------------------
+
+export interface DiagnosticRow {
+  date: string;
+  bookmarks: number;
+  pairedItems: number;
+  gap: number;
+}
+
+interface BookmarkLite {
+  source_card_id: string;
+}
+
+interface ItineraryItemLite {
+  source_card_id: string;
+}
+
+export function computeDiagnostic(
+  bookmarks: ReadonlyArray<BookmarkLite>,
+  items: ReadonlyArray<ItineraryItemLite>,
+  cardIdToDate: ReadonlyMap<string, string>,
+): DiagnosticRow[] {
+  const bookmarkCountByDate = new Map<string, number>();
+  const seenBookmarkCardIds = new Set<string>();
+  for (const b of bookmarks) {
+    if (seenBookmarkCardIds.has(b.source_card_id)) continue;
+    seenBookmarkCardIds.add(b.source_card_id);
+    const d = cardIdToDate.get(b.source_card_id);
+    if (!d) continue;
+    bookmarkCountByDate.set(d, (bookmarkCountByDate.get(d) ?? 0) + 1);
+  }
+
+  const itemCountByDate = new Map<string, number>();
+  const seenItemCardIds = new Set<string>();
+  for (const it of items) {
+    if (seenItemCardIds.has(it.source_card_id)) continue;
+    seenItemCardIds.add(it.source_card_id);
+    const d = cardIdToDate.get(it.source_card_id);
+    if (!d) continue;
+    itemCountByDate.set(d, (itemCountByDate.get(d) ?? 0) + 1);
+  }
+
+  const allDates = new Set<string>([
+    ...bookmarkCountByDate.keys(),
+    ...itemCountByDate.keys(),
+  ]);
+  const rows: DiagnosticRow[] = [];
+  for (const d of [...allDates].sort()) {
+    const bm = bookmarkCountByDate.get(d) ?? 0;
+    const it = itemCountByDate.get(d) ?? 0;
+    rows.push({ date: d, bookmarks: bm, pairedItems: it, gap: bm - it });
+  }
+  return rows;
+}
+
+function formatDiagnosticTable(rows: ReadonlyArray<DiagnosticRow>): string {
+  const header =
+    'date        | bookmarks | paired_items | gap\n' +
+    '------------+-----------+--------------+-----';
+  const lines = rows.map((r) => {
+    const date = r.date.padEnd(11);
+    const bm = String(r.bookmarks).padStart(9);
+    const it = String(r.pairedItems).padStart(12);
+    const gap = String(r.gap).padStart(4);
+    return `${date} | ${bm} | ${it} | ${gap}`;
+  });
+  return [header, ...lines].join('\n');
+}
+
+async function runDiagnostic(
+  client: SupabaseClient,
+  tripId: string,
+  exportData: TrelloExport,
+): Promise<void> {
+  // Build cardId → ISO date from Trello export. Out-of-range dates are excluded
+  // by parseDatedList; cards on non-dated lists never enter the map.
+  const listDateById = new Map<string, string>();
+  for (const list of exportData.lists) {
+    if (list.closed) continue;
+    const iso = parseDatedList(list.name);
+    if (iso) listDateById.set(list.id, iso);
+  }
+  const cardIdToDate = new Map<string, string>();
+  for (const c of exportData.cards) {
+    if (c.closed) continue;
+    const d = listDateById.get(c.idList);
+    if (d) cardIdToDate.set(c.id, d);
+  }
+  logInfo('diagnostic: dated cards from export', {
+    datedLists: listDateById.size,
+    datedCards: cardIdToDate.size,
+  });
+
+  // Bounded read: bookmarks for trip with source_card_id non-null. ~60 rows
+  // lifetime for the Japan 2026 trip.
+  const { data: bmRaw, error: bmErr } = await client
+    .from('bookmarks')
+    .select('source_card_id')
+    .eq('trip_id', tripId)
+    .not('source_card_id', 'is', null);
+  if (bmErr) throw new Error(`diagnostic: select bookmarks: ${bmErr.message}`);
+
+  const { data: itRaw, error: itErr } = await client
+    .from('itinerary_items')
+    .select('source_card_id')
+    .eq('trip_id', tripId)
+    .not('source_card_id', 'is', null);
+  if (itErr) throw new Error(`diagnostic: select itinerary_items: ${itErr.message}`);
+
+  const bookmarks: BookmarkLite[] = [];
+  for (const row of bmRaw ?? []) {
+    const sid = row.source_card_id;
+    if (typeof sid === 'string') bookmarks.push({ source_card_id: sid });
+  }
+  const items: ItineraryItemLite[] = [];
+  for (const row of itRaw ?? []) {
+    const sid = row.source_card_id;
+    if (typeof sid === 'string') items.push({ source_card_id: sid });
+  }
+
+  const rows = computeDiagnostic(bookmarks, items, cardIdToDate);
+  const totalBookmarks = rows.reduce((s, r) => s + r.bookmarks, 0);
+  const totalPaired = rows.reduce((s, r) => s + r.pairedItems, 0);
+  const totalGap = rows.reduce((s, r) => s + r.gap, 0);
+
+  process.stdout.write(`\nB-030 diagnostic — trip ${tripId}\n`);
+  process.stdout.write(formatDiagnosticTable(rows));
+  process.stdout.write(
+    `\n\nTotals — bookmarks: ${totalBookmarks}, paired_items: ${totalPaired}, gap: ${totalGap}\n`,
+  );
+
+  // Branch decision hint per AC 2.
+  let hint: string;
+  if (totalPaired === 0 && totalBookmarks > 0) {
+    hint =
+      'Branch A — paired_items is zero across all dates; --backfill was likely never run. ' +
+      'Re-run with `--backfill` (after `--dry-run` review).';
+  } else if (totalGap > 0 && totalPaired > 0) {
+    hint =
+      'Branch B candidate — some days have paired_items but day-view shows 0. ' +
+      'Investigate GET /api/trips/[id]/items rendering / filtering.';
+  } else if (totalGap > 0 && totalPaired === 0) {
+    hint =
+      'Branch A or C — investigate --backfill --dry-run output to distinguish.';
+  } else {
+    hint = 'No gap detected — bookmarks and paired_items align on every date.';
+  }
+  process.stdout.write(`\n${hint}\n`);
+}
+
+// ---------------------------------------------------------------------------
 // Main.
 // ---------------------------------------------------------------------------
 
@@ -1017,6 +1192,33 @@ async function main(): Promise<void> {
 
   const ownerId = await findUserIdByEmail(client, args.userEmail);
   logInfo('user resolved', { ownerId });
+
+  // B-030: --diagnose is read-only. Resolve the live trip id by (owner, name)
+  // unless --trip-id was passed explicitly. Print the per-date table and exit.
+  if (args.diagnose) {
+    let tripId = args.tripId;
+    if (!tripId) {
+      const { data: existing, error: selErr } = await client
+        .from('trips')
+        .select('id')
+        .eq('owner_id', ownerId)
+        .eq('name', TRIP_NAME)
+        .maybeSingle();
+      if (selErr) throw new Error(`diagnostic: select trips: ${selErr.message}`);
+      if (!existing) {
+        throw new Error(
+          `diagnostic: no trip named "${TRIP_NAME}" owned by ${args.userEmail}`,
+        );
+      }
+      const eid: unknown = existing.id;
+      if (typeof eid !== 'string') {
+        throw new Error('diagnostic: trip id is not a string');
+      }
+      tripId = eid;
+    }
+    await runDiagnostic(client, tripId, exportData);
+    return;
+  }
 
   // Build list_id → ISO date map.
   const listDateById = new Map<string, string>();

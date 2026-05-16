@@ -173,7 +173,7 @@ export function RelinkPlaceDialog({
       role="dialog"
       aria-modal="true"
       aria-labelledby="relink-dialog-title"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+      className="fixed inset-0 z-[1100] flex items-center justify-center p-4 bg-black/50"
     >
       <div
         ref={dialogRef}

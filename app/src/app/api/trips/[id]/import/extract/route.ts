@@ -76,10 +76,22 @@ export async function POST(
     if (!parsed.success) return validationError(parsed.error);
     const input = parsed.data;
 
+    // B-035 — caption-mode with a stashed Instagram/TikTok URL. The FE pasted
+    // the URL, the banner pre-empted the unsupported-source error, the user
+    // switched to caption mode, and the original URL rides along for
+    // traceability. We treat it as text-source extraction but persist
+    // `source_url = stashed_source_url`. No live URL fetch.
+    const stashedUrl =
+      'stashed_source_url' in input && input.stashed_source_url !== undefined
+        ? input.stashed_source_url
+        : undefined;
+    // The URL we consider for duplicate detection + persistence:
+    const effectiveUrl = input.source_url ?? stashedUrl;
+
     // AC #12 — duplicate URL warning. If the same URL was imported on this trip
     // within the last 24h, refuse with a clear code rather than spending LLM
     // tokens silently. Client surfaces the warning + "view previous results".
-    if (input.source_url !== undefined) {
+    if (effectiveUrl !== undefined) {
       const cutoff = new Date(
         Date.now() - DUPLICATE_WINDOW_HOURS * 60 * 60 * 1000,
       ).toISOString();
@@ -87,7 +99,7 @@ export async function POST(
         .from('import_sources')
         .select('id, created_at')
         .eq('trip_id', tripId)
-        .eq('source_url', input.source_url)
+        .eq('source_url', effectiveUrl)
         .gte('created_at', cutoff)
         .order('created_at', { ascending: false })
         .limit(1)
@@ -104,6 +116,8 @@ export async function POST(
     }
 
     // Fetch the source (YouTube transcript / oEmbed / generic OG / text passthrough).
+    // For B-035 caption-with-stashed-URL we treat as raw-text only — never fetch
+    // the stashed URL (that's the whole point of the banner).
     let fetched;
     try {
       fetched = await fetchSource({
@@ -158,12 +172,15 @@ export async function POST(
     }
 
     // Persist the import_sources row. trip_id is taken from the URL — never the body (AC #14).
+    // B-035: when the user came through the caption-with-stashed-URL path, the
+    // row keeps `source_type='text'` (from fetched) but `source_url` is the
+    // original Instagram/TikTok URL for later backlinking.
     const { data: inserted, error: insertErr } = await supabase
       .from('import_sources')
       .insert({
         trip_id: tripId,
         created_by: userId,
-        source_url: input.source_url ?? null,
+        source_url: effectiveUrl ?? null,
         source_type: fetched.source_type,
         raw_text: fetched.raw_text,
         extracted_json: extracted,

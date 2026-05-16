@@ -10,6 +10,7 @@
 //   - Google attribution footer (Powered by Google + author attributions)
 
 import type { ReactNode } from "react";
+import Link from "next/link";
 import type { PhotoAttribution, PlaceDetail } from "@/lib/types/domain";
 import { PlaceCategoryBadge } from "@/components/places/PlaceCategoryBadge";
 import { OpeningHours } from "@/components/places/OpeningHours";
@@ -18,6 +19,20 @@ import { GoogleAttribution } from "@/components/places/GoogleAttribution";
 import { CopyAddressButton } from "@/components/places/CopyAddressButton";
 import { PlaceMiniMap } from "@/components/places/PlaceMiniMap";
 import { RelinkTriggerPill } from "@/components/places/RelinkTriggerPill";
+import { AddToItineraryTriggerPill } from "@/components/itinerary/AddToItineraryTriggerPill";
+import type { AddToItineraryCategory } from "@/components/itinerary/AddToItineraryDialog";
+
+/**
+ * B-032 — Planned-day chip data passed by the server component. One entry per
+ * distinct dated `trip_days` row that has at least one `itinerary_items` row
+ * pointing at this place. Pre-formatted server-side for determinism.
+ */
+export interface PlannedDayChip {
+  /** `day_number` used to build the `#day-<n>` anchor on the itinerary page. */
+  dayNumber: number;
+  /** `dd.mm.yyyy` label rendered inside the chip. */
+  formattedDate: string;
+}
 
 // B-027 — Build the canonical "search by place" Google Maps URL anchored on
 // place_id so it resolves the right entity even if coords drift.
@@ -46,6 +61,17 @@ interface PlaceDetailViewProps {
   canRelink?: boolean;
   /** Internal `places.id` UUID for the currently-displayed Google place. */
   fromPlaceId?: string;
+  /**
+   * B-032 — Active trip context (any verified member role). Used to build the
+   * `Planned on …` chip links to `/trips/<tripContextId>/itinerary#day-<n>`.
+   * Distinct from `tripId` (which is only set when the viewer can re-link).
+   */
+  tripContextId?: string;
+  /**
+   * B-032 — Dated days this place is scheduled on within `tripContextId`.
+   * Empty array → no chip group is rendered.
+   */
+  plannedDays?: PlannedDayChip[];
 }
 
 /**
@@ -65,6 +91,23 @@ function sanitizeWebsite(url: string | null): string | null {
   }
 }
 
+/**
+ * B-033 — Map the wider `PlaceCategory` (restaurant/cafe/bar/sight/museum/
+ * shopping/hotel/transport_hub/park/other) to the narrower
+ * `AddToItineraryCategory` so the dialog can derive its type default per AC:
+ * restaurant/cafe → 'restaurant' (defaults to "meal"); everything else →
+ * 'other' (defaults to "activity"). User can override the type in the dialog.
+ */
+function toAddToItineraryCategory(
+  category: PlaceDetail["category"],
+): AddToItineraryCategory {
+  if (category === "restaurant" || category === "cafe") return "restaurant";
+  if (category === "sight") return "sight";
+  if (category === "museum") return "museum";
+  if (category === "shopping") return "shopping";
+  return "other";
+}
+
 function formatRating(rating: number | null): string {
   if (rating === null) return "Not rated";
   return rating.toFixed(1);
@@ -76,6 +119,8 @@ export function PlaceDetailView({
   tripId,
   canRelink,
   fromPlaceId,
+  tripContextId,
+  plannedDays,
 }: PlaceDetailViewProps) {
   const showRelink = Boolean(tripId && canRelink && fromPlaceId);
   const safeWebsite = sanitizeWebsite(detail.website);
@@ -102,7 +147,14 @@ export function PlaceDetailView({
 
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-10">
-      <header className="space-y-3">
+      <Link
+        href={(tripContextId ?? tripId) ? `/trips/${tripContextId ?? tripId}/places` : "/trips"}
+        className="inline-flex items-center gap-1 text-sm text-zinc-600 hover:text-zinc-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 rounded dark:text-zinc-400 dark:hover:text-zinc-100"
+      >
+        <span aria-hidden="true">←</span>
+        <span>{(tripContextId ?? tripId) ? "Back to trip" : "Back to trips"}</span>
+      </Link>
+      <header className="mt-4 space-y-3">
         <div className="flex items-center gap-2">
           <PlaceCategoryBadge category={detail.category} />
           {detail.source === "cache" ? (
@@ -162,7 +214,35 @@ export function PlaceDetailView({
             currentPlaceName={detail.name}
           />
         ) : null}
+        {/* B-033 — "Add to itinerary" pill. Same gate as Re-link (editor/owner
+            of the trip with a cached places.id) so we don't render for
+            viewers or for unverified trip contexts. */}
+        {showRelink && tripId && fromPlaceId ? (
+          <AddToItineraryTriggerPill
+            tripId={tripId}
+            placeId={fromPlaceId}
+            placeName={detail.name}
+            category={toAddToItineraryCategory(detail.category)}
+          />
+        ) : null}
         </div>
+        {tripContextId && plannedDays && plannedDays.length > 0 ? (
+          <nav
+            aria-label="Scheduled days for this place"
+            className="flex flex-wrap items-center gap-2"
+            data-testid="planned-on-chips"
+          >
+            {plannedDays.map((d) => (
+              <Link
+                key={d.dayNumber}
+                href={`/trips/${tripContextId}/itinerary#day-${d.dayNumber}`}
+                className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-medium text-sky-800 hover:bg-sky-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 dark:border-sky-800/60 dark:bg-sky-950/40 dark:text-sky-200 dark:hover:bg-sky-900/40"
+              >
+                Planned on {d.formattedDate}
+              </Link>
+            ))}
+          </nav>
+        ) : null}
       </header>
 
       {detail.formatted_address ? (

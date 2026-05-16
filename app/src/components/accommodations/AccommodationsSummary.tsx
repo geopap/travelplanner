@@ -37,19 +37,29 @@ export function AccommodationsSummary({
       aria-labelledby="accommodations-summary-heading"
       className="mt-10"
     >
-      <div className="flex items-baseline justify-between gap-3 mb-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 mb-3">
         <h2
           id="accommodations-summary-heading"
           className="text-lg font-semibold text-zinc-900 dark:text-zinc-50"
         >
           Accommodations
         </h2>
-        {status === "ready" && total > 0 && (
-          <span className="text-xs text-zinc-500">
-            {total} {total === 1 ? "stay" : "stays"}
-            {items.length < total && ` (showing ${items.length})`}
-          </span>
-        )}
+        <div className="flex items-baseline gap-3 shrink-0">
+          {status === "ready" && total > 0 && (
+            <span className="text-xs text-zinc-500">
+              {total} {total === 1 ? "stay" : "stays"}
+              {items.length < total && ` (showing ${items.length})`}
+            </span>
+          )}
+          {canEdit && (
+            <Link
+              href={`/trips/${tripId}/accommodations`}
+              className="shrink-0 text-sm font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 dark:hover:text-indigo-300 underline-offset-2 hover:underline"
+            >
+              Manage accommodations
+            </Link>
+          )}
+        </div>
       </div>
 
       {status === "loading" && (

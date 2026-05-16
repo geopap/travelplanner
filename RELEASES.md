@@ -4,6 +4,56 @@ Local reference copy. Source of truth: GitHub Releases.
 
 ---
 
+## v0.8.0 — Day-view repair + place-detail/places-list wiring (2026-05-16)
+
+Sprint 8 roots out the silent item-drop bug in the itinerary day view, introduces Trello pairing diagnostics and live backfill tooling, and wires up a cluster of "plan from anywhere" surfaces: "Bookmarks for this day" on each day card, "Planned on …" chips on place detail, "Add to Itinerary" from bookmark rows and place detail, "Add a place" dialog on the Places list, and an All / Planned / Not Planned segmented filter. First migration-free sprint.
+
+### Shipped
+
+- **B-030 Trello pairing diagnostic + live backfill** — New `--diagnose` flag on `import-trello.ts` generates a per-date `date | bookmarks | paired_items | gap` table (read-only). Ran successfully against Japan 2026: 101 bookmarks backfilled, 0 errors. Branch C regression test added (`planBackfillCard` planner).
+- **B-030 Branch B — Unscheduled itinerary section** — Root-cause fix for the silent item-drop bug in `ItineraryView.tsx` (items with `null` or stale `day_id` were discarded during bucketing). New `UNSCHEDULED_KEY` bucket + `UnscheduledSection` component with per-row day picker (PATCH existing route); viewers see rows read-only.
+- **B-031 "Bookmarks for this day" section** — New collapsible section on each day card between the items list and the map. New endpoint `GET /api/trips/[id]/days/[dayId]/bookmarks` (viewer-or-higher; existence-hiding 404). New shared `app/src/lib/bookmarks/pairing.ts` helper with `isPaired`, `buildPairingOrClause`, `getDayPairingKeys`, `getPairedBookmarkIdsForDay` — the canonical OR predicate, single-source.
+- **B-032 "Planned on dd.mm.yyyy" chips** — Chip group on `/places/[id]?trip=<uuid>` header showing every scheduled day; chips link to `#day-<dayNumber>` anchors. Server-side formatted; uses existing `itinerary_items_trip_place_idx` index.
+- **B-033 "Add to Itinerary" pill** — Entry points on `BookmarkItem` rows and `PlaceDetailView` header. Day selector (required), time pickers (optional), type selector (transport excluded). Server-side title resolution from `places.name`; `source_card_id` never written (user-scheduled vs Trello-paired distinction preserved).
+- **B-034 Inline transport/accommodations CTAs** — `TransportSummary` and `AccommodationsSummary` headers restructured to `flex items-baseline justify-between`; "Manage" links inline with `<h2>`. Duplicate bottom-of-overview row flagged for follow-up.
+- **B-035 IG/TT URL caption-mode hint** — `ImportPasteForm` detects Instagram/TikTok hosts pre-submit and shows an inline banner with "Switch to caption mode". New `ExtractInputCaptionWithUrl` union variant in validator; stashed URL persisted as `import_sources.source_url` for traceability.
+- **B-037 "Add a place" dialog** — "Add a place" button above the Places category tab bar (editor/owner only). Dialog reuses `PlaceSearchInput` + `POST /api/trips/[id]/bookmarks`; pre-hydrates Places cache; 409 `bookmark_exists` surfaces inline.
+- **B-038 All / Planned / Not Planned filter** — Segmented `role="radiogroup"` below the "Add a place" button, above category tabs. URL: `?plan=<all|planned|notplanned>`; trip-wide split counts in labels; tab badge counts respect active filter. Consumes `getBookmarksWithPlannedFlag` from shared `pairing.ts`.
+- **S7 follow-ups folded in** — Trip-context plumbing through `BookmarkItem`, "Back to trip" link in `PlaceDetailView`, `RelinkPlaceDialog` z-[1100].
+
+### Stats
+
+- **994/994 vitest tests passing** (+166 net new vs v0.7.0; 69 test files)
+- **0 CRITICAL / 0 HIGH** from R4 (code-reviewer + security-reviewer)
+- 1 HIGH fixed during R4: H-1 `ItineraryView.tsx` silent item drop in `onReassigned` (refetch fallback added)
+- 1 Security MEDIUM fixed: Sec-M-1 collapsed two distinct 400 bodies in POST items title-default path to a single generic message
+- `tsc --noEmit` clean; `next build` green
+- All 8/8 items UAT PASS (incl. Branch B)
+
+### Database
+
+No migrations this sprint. All schema requirements covered by existing indexes from prior sprints (0011, 0023).
+
+### Deferred to follow-up
+
+**Code-reviewer findings (7 MEDIUM + 5 LOW):**
+- M-1: `pairing.ts` internal DRY — `getDayPairingKeys` / `getTripPairingKeys` share identical row-normalisation loops (extract `normalisePairingKeyRows` private helper)
+- M-2: `AddToItineraryDialog.tsx:331` unsafe `as AddToItineraryType` cast on select value
+- M-3: `ItineraryView.tsx:656,667,669` `item.title` aria-label null guard ("Assign day for null" on screen readers)
+- M-4: `role="dialog"` placed on backdrop overlay div rather than inner content box — affects `RelinkPlaceDialog`, `AddToItineraryDialog`, `AddPlaceDialog` (pre-existing from S7)
+- L-1: `getBookmarksWithPlannedFlag` RT2 uses `as TripBookmarkRow[]` cast without Zod validation
+- L-2: `ImportPasteForm.tsx:128` `stashedSourceUrl as string` assertion (acceptable as-is)
+- L-3: PostgREST FK hint `places!bookmarks_place_id_fkey` — verify against Supabase Studio
+- L-4: `UnscheduledSection` inlined in `ItineraryView.tsx` (consider extraction to own file)
+- L-5: `toAddToItineraryCategory` mapper in `PlaceDetailView.tsx` instead of colocated with dialog
+
+**Security-reviewer findings (2 MEDIUM + 3 LOW — code MEDIUM fixed above):**
+- Sec-M-2: PATCH `place_id` parity — when PATCH supplies `place_id` and no `title`, title not backfilled from `places.name` (data-quality gap, no security risk)
+- Sec-M-3: B-031 `.limit(200)` on bookmark fetch silently truncates if > 200 bookmarks paired to a single day (unreachable in practice; no data leak)
+- Sec-L-1 through Sec-L-5: all recorded as confirmations / hardening notes; no exploitability identified
+
+---
+
 ## v0.7.0 — Place-link polish + flight number (2026-05-16)
 
 Sprint 7 adds re-linking bookmarks/itinerary items to the correct Google Place when the original pick was wrong, a mini-map on the place detail page, tabbed category filtering on the Places tab, and flight number on transportation records.

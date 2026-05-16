@@ -31,6 +31,14 @@ interface TripDetailResponse {
   member: { role: MemberRole };
 }
 
+// B-030 Branch B — items whose `day_id` is null OR points to a `trip_days`
+// row that isn't in the returned days array would otherwise be silently
+// dropped by the day-bucketing logic, hiding existing trip content from the
+// user (the diagnostic counts them via `source_card_id`, but the UI never
+// rendered them). Surface them in a dedicated "Unscheduled" section so the
+// user can reassign each one to a day.
+const UNSCHEDULED_KEY = "__unscheduled__";
+
 interface DrawerState {
   open: boolean;
   dayId: string;
@@ -139,9 +147,15 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
 
         const itemsByDay: Record<string, ItineraryItem[]> = {};
         for (const day of days) itemsByDay[day.id] = [];
+        itemsByDay[UNSCHEDULED_KEY] = [];
         for (const item of itemsRes.items) {
           if (item.day_id && itemsByDay[item.day_id]) {
             itemsByDay[item.day_id].push(item);
+          } else {
+            // day_id null OR points to a trip_days row that's no longer
+            // returned for this trip — bucket as Unscheduled so it remains
+            // visible and editable. See B-030 Branch B.
+            itemsByDay[UNSCHEDULED_KEY].push(item);
           }
         }
         // Sort each day: start_time asc, nulls last, then created_at asc
@@ -199,12 +213,13 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
       setLoadState((s) => {
         if (s.status !== "ready") return s;
         const next: Record<string, ItineraryItem[]> = { ...s.itemsByDay };
+        if (!next[UNSCHEDULED_KEY]) next[UNSCHEDULED_KEY] = [];
         for (const item of res.items) {
-          if (item.day_id && next[item.day_id]) {
-            // Avoid duplicates if the same item was already loaded.
-            if (!next[item.day_id].some((i) => i.id === item.id)) {
-              next[item.day_id] = [...next[item.day_id], item];
-            }
+          const bucket =
+            item.day_id && next[item.day_id] ? item.day_id : UNSCHEDULED_KEY;
+          // Avoid duplicates if the same item was already loaded.
+          if (!next[bucket].some((i) => i.id === item.id)) {
+            next[bucket] = [...next[bucket], item];
           }
         }
         for (const id of Object.keys(next)) {
@@ -269,14 +284,15 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
       if (s.status !== "ready") return s;
       const targetDayId = item.day_id ?? drawer?.dayId ?? "";
       const next: Record<string, ItineraryItem[]> = { ...s.itemsByDay };
+      if (!next[UNSCHEDULED_KEY]) next[UNSCHEDULED_KEY] = [];
 
       // Remove from previous day lists if it was there (handles day reassign).
       for (const id of Object.keys(next)) {
         next[id] = next[id].filter((i) => i.id !== item.id);
       }
-      if (targetDayId && next[targetDayId]) {
-        next[targetDayId] = [...next[targetDayId], item].sort(compareItems);
-      }
+      const bucket =
+        targetDayId && next[targetDayId] ? targetDayId : UNSCHEDULED_KEY;
+      next[bucket] = [...next[bucket], item].sort(compareItems);
 
       // Sync the transport map — set when present, drop when transport sub-row
       // was deleted (e.g. type changed away from 'transport').
@@ -412,6 +428,53 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
         </nav>
 
         <div className="space-y-4">
+          {(itemsByDay[UNSCHEDULED_KEY] ?? []).length > 0 && (
+            <UnscheduledSection
+              tripId={trip.id}
+              items={itemsByDay[UNSCHEDULED_KEY] ?? []}
+              days={days}
+              canEdit={role === "owner" || role === "editor"}
+              onReassigned={(itemId, newDayId) => {
+                setLoadState((s) => {
+                  if (s.status !== "ready") return s;
+                  const next: Record<string, ItineraryItem[]> = {
+                    ...s.itemsByDay,
+                  };
+                  let moved: ItineraryItem | undefined;
+                  for (const id of Object.keys(next)) {
+                    const before = next[id];
+                    const filtered = before.filter((i) => {
+                      if (i.id === itemId) {
+                        moved = i;
+                        return false;
+                      }
+                      return true;
+                    });
+                    if (filtered.length !== before.length) {
+                      next[id] = filtered;
+                    }
+                  }
+                  if (moved) {
+                    if (next[newDayId]) {
+                      next[newDayId] = [
+                        ...next[newDayId],
+                        { ...moved, day_id: newDayId },
+                      ].sort(compareItems);
+                    } else {
+                      // Defensive: target bucket missing (invariant break) —
+                      // never silently drop the item. Re-bucket as Unscheduled
+                      // so it remains visible and editable. R4 H-1 fix.
+                      next[UNSCHEDULED_KEY] = [
+                        ...(next[UNSCHEDULED_KEY] ?? []),
+                        { ...moved, day_id: null },
+                      ].sort(compareItems);
+                    }
+                  }
+                  return { ...s, itemsByDay: next };
+                });
+              }}
+            />
+          )}
           {days.map((day) => (
             <DayCard
               key={day.id}
@@ -526,6 +589,115 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
         }}
       />
     </>
+  );
+}
+
+interface UnscheduledSectionProps {
+  tripId: string;
+  items: ItineraryItem[];
+  days: TripDay[];
+  canEdit: boolean;
+  onReassigned: (itemId: string, newDayId: string) => void;
+}
+
+// B-030 Branch B — visible bucket for items whose `day_id` is null or
+// no longer matches a current trip_day. Lets editors/owners reassign each
+// item to a day via PATCH /items/[itemId]; viewers see read-only entries.
+function UnscheduledSection({
+  tripId,
+  items,
+  days,
+  canEdit,
+  onReassigned,
+}: UnscheduledSectionProps) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [errorByItem, setErrorByItem] = useState<Record<string, string>>({});
+
+  async function reassign(itemId: string, dayId: string) {
+    if (!dayId) return;
+    setBusyId(itemId);
+    setErrorByItem((m) => {
+      const { [itemId]: _omit, ...rest } = m;
+      void _omit;
+      return rest;
+    });
+    try {
+      await apiFetch<{ item: ItineraryItem }>(
+        `/api/trips/${tripId}/items/${itemId}`,
+        { method: "PATCH", body: { day_id: dayId } },
+      );
+      onReassigned(itemId, dayId);
+    } catch (err) {
+      const message =
+        err instanceof ApiClientError
+          ? err.message
+          : "Could not move this item. Please try again.";
+      setErrorByItem((m) => ({ ...m, [itemId]: message }));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <section
+      aria-label="Unscheduled items"
+      data-testid="unscheduled-section"
+      className="rounded-2xl border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 p-5"
+    >
+      <header className="flex items-baseline justify-between gap-3">
+        <h2 className="text-lg font-semibold text-amber-900 dark:text-amber-100">
+          Unscheduled
+        </h2>
+        <span className="text-xs text-amber-800 dark:text-amber-200">
+          {items.length} {items.length === 1 ? "item" : "items"}
+        </span>
+      </header>
+      <p className="mt-1 text-sm text-amber-800 dark:text-amber-200">
+        These items aren&apos;t attached to a day{canEdit ? " — pick one to schedule them." : "."}
+      </p>
+      <ul className="mt-3 space-y-2">
+        {items.map((item) => (
+          <li
+            key={item.id}
+            className="rounded-lg border border-amber-200 dark:border-amber-900 bg-white dark:bg-zinc-900 p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"
+          >
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">
+                {item.title}
+              </p>
+              <p className="text-xs text-zinc-500">{item.type}</p>
+              {errorByItem[item.id] && (
+                <p role="alert" className="mt-1 text-xs text-red-600 dark:text-red-400">
+                  {errorByItem[item.id]}
+                </p>
+              )}
+            </div>
+            {canEdit && (
+              <label className="text-xs text-zinc-600 dark:text-zinc-300 flex items-center gap-2">
+                <span className="sr-only">Assign day for {item.title}</span>
+                <select
+                  aria-label={`Assign day for ${item.title}`}
+                  disabled={busyId === item.id}
+                  defaultValue=""
+                  onChange={(e) => void reassign(item.id, e.target.value)}
+                  className="h-9 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 px-2 text-sm"
+                >
+                  <option value="" disabled>
+                    {busyId === item.id ? "Saving…" : "Pick a day…"}
+                  </option>
+                  {days.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      Day {d.day_number} · {d.date}
+                      {d.title ? ` — ${d.title}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
