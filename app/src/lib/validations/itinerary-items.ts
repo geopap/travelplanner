@@ -30,6 +30,10 @@ const BaseCreateShape = {
   title: z.string().min(1).max(200),
   external_url: z.string().url().nullable().optional(),
   notes: z.string().max(5000).nullable().optional(),
+  // B-015: optional link to a cached `places` row. FK existence is enforced
+  // by the DB (ON DELETE SET NULL); the route performs no extra check because
+  // `places` is readable by any authenticated user (per 0004_places.sql).
+  place_id: UuidSchema.nullable().optional(),
 } as const;
 
 const NonTransportCreateBase = z
@@ -104,6 +108,8 @@ export const UpdateItineraryItemInput = z
     cost: z.number().nonnegative().nullable().optional(),
     currency: Iso4217Schema.nullable().optional(),
     transportation: TransportationPatch.optional(),
+    // B-015: optional FK to a cached `places` row, nullable to detach.
+    place_id: UuidSchema.nullable().optional(),
   })
   .refine((d) => Object.keys(d).length > 0, {
     message: 'At least one field is required',
@@ -134,8 +140,32 @@ export const ItineraryItemRowSchema = z.object({
   cost: z.number().nullable(),
   currency: z.string().nullable(),
   notes: z.string().nullable(),
+  place_id: z.string().uuid().nullable(),
   created_by: z.string().uuid(),
   created_at: z.string(),
   updated_at: z.string(),
 });
 export type ItineraryItemRow = z.infer<typeof ItineraryItemRowSchema>;
+
+/* ---------------------------------------------------------------------------
+ * B-015 — Map embed shape. The list endpoint LEFT JOINs `places` via PostgREST
+ * to deliver one row per item plus a slim `place` object (or null). Coords are
+ * normalised: if `lat` or `lng` is null, the whole `place` is null so the
+ * frontend can plot markers without further branching.
+ * ------------------------------------------------------------------------- */
+
+const ItineraryItemPlaceEmbedSchema = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string(),
+    lat: z.number().nullable(),
+    lng: z.number().nullable(),
+  })
+  .nullable();
+
+export const ItineraryItemWithPlaceRowSchema = ItineraryItemRowSchema.extend({
+  place: ItineraryItemPlaceEmbedSchema.optional(),
+});
+export type ItineraryItemWithPlaceRow = z.infer<
+  typeof ItineraryItemWithPlaceRowSchema
+>;

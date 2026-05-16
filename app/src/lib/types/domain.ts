@@ -53,6 +53,16 @@ export interface ItineraryItem {
   cost: number | null;
   currency: string | null;
   notes: string | null;
+  /** B-015 — optional FK to `places(id)`. Nullable; ON DELETE SET NULL. */
+  place_id: string | null;
+  /**
+   * B-015 — slim place row embedded by GET /api/trips/[id]/items when the
+   * itinerary item is linked to a cached place. Null when no link OR when the
+   * cached place lacks coords (normalised server-side so the map can rely on
+   * `place !== null` meaning "plottable"). Optional because non-list endpoints
+   * (GET by id, POST/PATCH responses) don't embed it.
+   */
+  place?: { id: string; lat: number; lng: number; name: string } | null;
   created_by: string;
   created_at: string;
   updated_at: string;

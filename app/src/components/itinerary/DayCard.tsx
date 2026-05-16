@@ -9,6 +9,7 @@ import { formatDate } from "@/lib/utils/format";
 import { EmptyState } from "@/components/EmptyState";
 import { ItineraryItemCard } from "./ItineraryItemCard";
 import { StayIndicator } from "@/components/accommodations/StayIndicator";
+import { DayMapSection } from "@/components/map/DayMapSection";
 
 interface DayCardProps {
   day: TripDay;
@@ -235,6 +236,9 @@ export function DayCard({
             + Add accommodation for this day
           </button>
         )}
+
+        {/* B-015 — Day-view map. Read-only for all roles (AC 9). */}
+        <DayMapSection tripId={day.trip_id} dayId={day.id} items={items} />
       </div>
     </article>
   );
