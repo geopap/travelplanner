@@ -19,6 +19,8 @@ import {
   labelToItineraryType,
   planBackfillCard,
   categoryToItemType,
+  isBookmarkPlaceIdLocked,
+  isItineraryPlaceIdLocked,
   type Summary,
 } from '../../scripts/import-trello';
 
@@ -536,5 +538,96 @@ describe('pairHotels', () => {
     );
     expect(pairs).toHaveLength(0);
     expect(summary.skipped).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. B-026 place_id_locked guards — bookmarks + itinerary_items.
+// ---------------------------------------------------------------------------
+
+describe('isBookmarkPlaceIdLocked / isItineraryPlaceIdLocked (B-026)', () => {
+  function makeCtx(
+    lockedValue: boolean | null,
+    table: 'bookmarks' | 'itinerary_items',
+    fromCalls: string[] = [],
+    errorMsg: string | null = null,
+  ): {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ctx: any;
+    fromCalls: string[];
+  } {
+    const eqArgs: Array<[string, string]> = [];
+    const client = {
+      from: (t: string) => {
+        fromCalls.push(t);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const chain: any = {
+          select: () => chain,
+          eq: (col: string, val: string) => {
+            eqArgs.push([col, val]);
+            return chain;
+          },
+          maybeSingle: async () => {
+            if (errorMsg) return { data: null, error: { message: errorMsg } };
+            if (t !== table) return { data: null, error: null };
+            return lockedValue === null
+              ? { data: null, error: null }
+              : { data: { place_id_locked: lockedValue }, error: null };
+          },
+        };
+        return chain;
+      },
+    };
+    return {
+      ctx: {
+        client,
+        tripId: 'trip-1',
+        ownerId: 'user-1',
+        daysByDate: new Map(),
+        dryRun: false,
+        summary: makeSummary(),
+      },
+      fromCalls,
+    };
+  }
+  const card = makeCard({ id: 'card-X', name: 'Pinned Place' });
+
+  it('returns true when bookmarks row exists with place_id_locked=true', async () => {
+    const { ctx } = makeCtx(true, 'bookmarks');
+    expect(await isBookmarkPlaceIdLocked(ctx, card)).toBe(true);
+  });
+
+  it('returns false when bookmarks row has place_id_locked=false', async () => {
+    const { ctx } = makeCtx(false, 'bookmarks');
+    expect(await isBookmarkPlaceIdLocked(ctx, card)).toBe(false);
+  });
+
+  it('returns false when no bookmarks row exists for the card', async () => {
+    const { ctx } = makeCtx(null, 'bookmarks');
+    expect(await isBookmarkPlaceIdLocked(ctx, card)).toBe(false);
+  });
+
+  it('throws when the bookmarks lock-check select returns an error', async () => {
+    const { ctx } = makeCtx(null, 'bookmarks', [], 'boom');
+    await expect(isBookmarkPlaceIdLocked(ctx, card)).rejects.toThrow(
+      /bookmarks lock-check/,
+    );
+  });
+
+  it('returns true for itinerary_items when locked', async () => {
+    const { ctx } = makeCtx(true, 'itinerary_items');
+    expect(await isItineraryPlaceIdLocked(ctx, card)).toBe(true);
+  });
+
+  it('returns false for itinerary_items when no row exists', async () => {
+    const { ctx } = makeCtx(null, 'itinerary_items');
+    expect(await isItineraryPlaceIdLocked(ctx, card)).toBe(false);
+  });
+
+  it('throws when the itinerary_items lock-check returns an error', async () => {
+    const { ctx } = makeCtx(null, 'itinerary_items', [], 'kaboom');
+    await expect(isItineraryPlaceIdLocked(ctx, card)).rejects.toThrow(
+      /itinerary_items lock-check/,
+    );
   });
 });

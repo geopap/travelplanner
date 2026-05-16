@@ -29,6 +29,8 @@ export const TransportationCreate = z
     cost: z.number().nonnegative().max(1_000_000_000).optional(),
     currency: Iso4217Schema.optional(),
     notes: z.string().max(2000).optional(),
+    // B-029 — airline flight number (e.g. "LX160"). Trimmed; 1–16 chars when present.
+    flight_number: z.string().trim().min(1).max(16).optional(),
   })
   .strict()
   .refine(
@@ -65,6 +67,8 @@ export const TransportationPatch = z
     cost: z.number().nonnegative().max(1_000_000_000).nullable().optional(),
     currency: Iso4217Schema.nullable().optional(),
     notes: z.string().max(2000).nullable().optional(),
+    // B-029 — nullable on patch to allow clearing the value.
+    flight_number: z.string().trim().min(1).max(16).nullable().optional(),
   })
   .strict()
   .refine(
@@ -98,6 +102,7 @@ export const TransportationRowSchema = z.object({
   cost: z.number().nullable(),
   currency: z.string().nullable(),
   notes: z.string().nullable(),
+  flight_number: z.string().nullable(),
   created_by: z.string().uuid().nullable(),
   created_at: z.string(),
   updated_at: z.string(),

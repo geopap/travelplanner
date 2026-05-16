@@ -24,6 +24,7 @@ export interface TransportFieldErrors {
   arrival_time?: string;
   cost?: string;
   currency?: string;
+  flight_number?: string;
 }
 
 export interface TransportFieldsValue {
@@ -36,6 +37,7 @@ export interface TransportFieldsValue {
   arrival_time: string; // datetime-local string
   cost: string; // raw input
   currency: string; // ISO 4217
+  flight_number: string; // B-029 — only persisted/shown when mode==='flight'
 }
 
 const MODE_OPTIONS: ReadonlyArray<{ value: TransportMode; label: string }> = [
@@ -118,6 +120,27 @@ export function TransportFields({
           />
         </FormField>
       </div>
+
+      {value.mode === "flight" && (
+        <FormField
+          id="transport_flight_number"
+          label="Flight number"
+          hint="Optional · e.g. LX160"
+          error={errors.flight_number}
+        >
+          <input
+            id="transport_flight_number"
+            type="text"
+            maxLength={16}
+            value={value.flight_number}
+            onChange={(e) => patch("flight_number", e.target.value)}
+            className={inputClass}
+            placeholder="LX160"
+            autoComplete="off"
+            aria-invalid={errors.flight_number ? true : undefined}
+          />
+        </FormField>
+      )}
 
       <FormField
         id="transport_confirmation"
@@ -270,5 +293,6 @@ export function emptyTransportFieldsValue(
     arrival_time: "",
     cost: "",
     currency: /^[A-Z]{3}$/.test(tripBaseCurrency) ? tripBaseCurrency : "USD",
+    flight_number: "",
   };
 }

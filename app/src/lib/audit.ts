@@ -42,7 +42,10 @@ export type AuditAction =
   | 'import_extract'
   | 'import_extract_failed'
   | 'import_saved'
-  | 'import_rate_limited';
+  | 'import_rate_limited'
+  | 'bookmark_relinked'
+  | 'itinerary_item_relinked'
+  | 'bookmarks_relinked_summary';
 
 export interface AuditParams {
   actorId: string | null;

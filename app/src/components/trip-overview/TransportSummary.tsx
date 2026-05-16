@@ -165,9 +165,11 @@ export function TransportSummary({ tripId, canEdit }: TransportSummaryProps) {
                       >
                         {meta.label}
                       </span>
-                      {row.carrier && (
+                      {(row.carrier || (row.mode === "flight" && row.flight_number)) && (
                         <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-                          {row.carrier}
+                          {row.mode === "flight" && row.flight_number && row.carrier
+                            ? `${row.carrier} · ${row.flight_number}`
+                            : (row.carrier ?? row.flight_number)}
                         </span>
                       )}
                       {row.confirmation && (

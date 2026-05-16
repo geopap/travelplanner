@@ -121,3 +121,21 @@ export const PlaceDetailCachedSchema = z
   .passthrough();
 
 export type PlaceDetailCached = z.infer<typeof PlaceDetailCachedSchema>;
+
+// ---------------------------------------------------------------------------
+// B-026 — Relink body validation.
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/trips/[id]/bookmarks/relink body schema.
+ * - `trip_id` is read from the URL only — never accepted here.
+ * - `to_google_place_id` reuses `GooglePlaceIdParam` (Google opaque token regex).
+ */
+export const RelinkBodySchema = z
+  .object({
+    from_place_id: z.string().uuid(),
+    to_google_place_id: GooglePlaceIdParam,
+  })
+  .strict();
+
+export type RelinkBody = z.infer<typeof RelinkBodySchema>;

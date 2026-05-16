@@ -536,9 +536,13 @@ async function processBookmark(
   const noteText = card.desc && card.desc.trim().length
     ? `${card.name} — ${card.desc.trim()}`
     : card.name;
-  const row = {
+  // B-026: respect place_id_locked — when the user has manually re-linked the
+  // bookmark to the correct Google place, the importer must not overwrite
+  // place_id (which is always `null` from a fresh Trello export anyway, but a
+  // future enrichment pass could set it). Omit place_id from the upsert
+  // payload when locked.
+  const baseRow = {
     trip_id: ctx.tripId,
-    place_id: null,
     category,
     notes: truncate(noteText, 500),
     added_by: ctx.ownerId,
@@ -548,6 +552,13 @@ async function processBookmark(
     logPlan('would upsert bookmark', { cardId: card.id, category });
     ctx.summary.bookmarks++;
     return;
+  }
+  const locked = await isBookmarkPlaceIdLocked(ctx, card);
+  const row: Record<string, unknown> = locked
+    ? baseRow
+    : { ...baseRow, place_id: null };
+  if (locked) {
+    logPlan('skipped place_id update (locked) for card', { cardId: card.id });
   }
   const { error } = await ctx.client
     .from('bookmarks')
@@ -567,13 +578,12 @@ async function processLabeledItem(
   itemType: 'meal' | 'activity',
   placeId: string | null,
 ): Promise<void> {
-  const row = {
+  const baseRow = {
     trip_id: ctx.tripId,
     day_id: dayId,
     type: itemType,
     title: card.name.slice(0, 200),
     notes: truncate(card.desc, 4000),
-    place_id: placeId,
     created_by: ctx.ownerId,
     source_card_id: card.id,
   };
@@ -586,11 +596,51 @@ async function processLabeledItem(
     ctx.summary.items++;
     return;
   }
+  // B-026: respect place_id_locked on the existing labeled-item row, if any.
+  const locked = await isItineraryPlaceIdLocked(ctx, card);
+  const row: Record<string, unknown> = locked
+    ? baseRow
+    : { ...baseRow, place_id: placeId };
+  if (locked) {
+    logPlan('skipped place_id update (locked) for card', { cardId: card.id });
+  }
   const { error } = await ctx.client
     .from('itinerary_items')
     .upsert(row, { onConflict: 'trip_id,source_card_id' });
   if (error) throw new Error(`itinerary_items (labeled): ${error.message}`);
   ctx.summary.items++;
+}
+
+// B-026: returns true when an existing bookmarks row for (trip_id, source_card_id)
+// has place_id_locked=true. One indexed point-lookup; called once per card on
+// import, well within the 30s import budget.
+export async function isBookmarkPlaceIdLocked(
+  ctx: ProcessCtx,
+  card: TrelloCard,
+): Promise<boolean> {
+  const { data, error } = await ctx.client
+    .from('bookmarks')
+    .select('place_id_locked')
+    .eq('trip_id', ctx.tripId)
+    .eq('source_card_id', card.id)
+    .maybeSingle();
+  if (error) throw new Error(`bookmarks lock-check: ${error.message}`);
+  return data?.place_id_locked === true;
+}
+
+// B-026: same as above for itinerary_items.
+export async function isItineraryPlaceIdLocked(
+  ctx: ProcessCtx,
+  card: TrelloCard,
+): Promise<boolean> {
+  const { data, error } = await ctx.client
+    .from('itinerary_items')
+    .select('place_id_locked')
+    .eq('trip_id', ctx.tripId)
+    .eq('source_card_id', card.id)
+    .maybeSingle();
+  if (error) throw new Error(`itinerary_items lock-check: ${error.message}`);
+  return data?.place_id_locked === true;
 }
 
 // B-022: pre-upsert SELECT to read the just-or-already-upserted bookmark's

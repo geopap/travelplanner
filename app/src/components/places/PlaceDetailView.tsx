@@ -2,12 +2,11 @@
 // `PlaceDetail` payload returned by GET /api/places/[googlePlaceId].
 //
 // Sections:
-//   - Header: name, category badge, rating
+//   - Header: category badge, name, rating, "Open in Google Maps" pill (B-027)
 //   - Address (with copy-to-clipboard button)
 //   - Phone (tel: link), Website (sanitised — http/https only)
-//   - Opening hours
+//   - Hours + Location mini-map (2-col on md+, stacked on mobile) (B-027)
 //   - Photo gallery
-//   - Google Maps deep link
 //   - Google attribution footer (Powered by Google + author attributions)
 
 import type { ReactNode } from "react";
@@ -17,6 +16,19 @@ import { OpeningHours } from "@/components/places/OpeningHours";
 import { PhotoGallery } from "@/components/places/PhotoGallery";
 import { GoogleAttribution } from "@/components/places/GoogleAttribution";
 import { CopyAddressButton } from "@/components/places/CopyAddressButton";
+import { PlaceMiniMap } from "@/components/places/PlaceMiniMap";
+import { RelinkTriggerPill } from "@/components/places/RelinkTriggerPill";
+
+// B-027 — Build the canonical "search by place" Google Maps URL anchored on
+// place_id so it resolves the right entity even if coords drift.
+function buildGoogleMapsSearchUrl(
+  lat: number,
+  lng: number,
+  googlePlaceId: string,
+): string {
+  const query = `${lat},${lng}`;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}&query_place_id=${encodeURIComponent(googlePlaceId)}`;
+}
 
 interface PlaceDetailViewProps {
   detail: PlaceDetail;
@@ -25,6 +37,15 @@ interface PlaceDetailViewProps {
    * mounts the `BookmarkButton` here only when the viewer is authenticated.
    */
   bookmarkSlot?: ReactNode;
+  /**
+   * B-026 — When the page was visited with `?trip=<uuid>` and the viewer
+   * is an owner/editor of that trip with an existing place row, the page
+   * passes these props down so the "Re-link" pill renders in the header.
+   */
+  tripId?: string;
+  canRelink?: boolean;
+  /** Internal `places.id` UUID for the currently-displayed Google place. */
+  fromPlaceId?: string;
 }
 
 /**
@@ -49,8 +70,24 @@ function formatRating(rating: number | null): string {
   return rating.toFixed(1);
 }
 
-export function PlaceDetailView({ detail, bookmarkSlot }: PlaceDetailViewProps) {
+export function PlaceDetailView({
+  detail,
+  bookmarkSlot,
+  tripId,
+  canRelink,
+  fromPlaceId,
+}: PlaceDetailViewProps) {
+  const showRelink = Boolean(tripId && canRelink && fromPlaceId);
   const safeWebsite = sanitizeWebsite(detail.website);
+  const hasCoords = detail.lat !== null && detail.lng !== null;
+  const googleMapsSearchUrl =
+    hasCoords && detail.google_place_id
+      ? buildGoogleMapsSearchUrl(
+          detail.lat as number,
+          detail.lng as number,
+          detail.google_place_id,
+        )
+      : null;
   const photoAttributions: PhotoAttribution[] = [];
   const seenAttributions = new Set<string>();
   for (const photo of detail.photos) {
@@ -91,6 +128,41 @@ export function PlaceDetailView({ detail, bookmarkSlot }: PlaceDetailViewProps) 
             </span>
           ) : null}
         </p>
+        <div className="flex flex-wrap items-center gap-2">
+        {googleMapsSearchUrl ? (
+          <a
+            href={googleMapsSearchUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Open in Google Maps (opens in a new tab)"
+            className="inline-flex items-center gap-1 rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            <span>Open in Google Maps</span>
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 24 24"
+              width="12"
+              height="12"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M14 3h7v7" />
+              <path d="M10 14L21 3" />
+              <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+            </svg>
+          </a>
+        ) : null}
+        {showRelink && tripId && fromPlaceId ? (
+          <RelinkTriggerPill
+            tripId={tripId}
+            fromPlaceId={fromPlaceId}
+            currentPlaceName={detail.name}
+          />
+        ) : null}
+        </div>
       </header>
 
       {detail.formatted_address ? (
@@ -145,17 +217,35 @@ export function PlaceDetailView({ detail, bookmarkSlot }: PlaceDetailViewProps) 
         ) : null}
       </section>
 
-      <section aria-labelledby="hours-heading" className="mt-6">
-        <h2
-          id="hours-heading"
-          className="text-sm font-semibold uppercase tracking-wider text-zinc-500"
-        >
-          Hours
-        </h2>
-        <div className="mt-2">
-          <OpeningHours hours={detail.opening_hours} />
-        </div>
-      </section>
+      <div className="mt-6 grid gap-6 md:grid-cols-2">
+        <section aria-labelledby="hours-heading">
+          <h2
+            id="hours-heading"
+            className="text-sm font-semibold uppercase tracking-wider text-zinc-500"
+          >
+            Hours
+          </h2>
+          <div className="mt-2">
+            <OpeningHours hours={detail.opening_hours} />
+          </div>
+        </section>
+        <section aria-labelledby="map-heading">
+          <h2
+            id="map-heading"
+            className="text-sm font-semibold uppercase tracking-wider text-zinc-500"
+          >
+            Location
+          </h2>
+          <div className="mt-2">
+            <PlaceMiniMap
+              lat={detail.lat}
+              lng={detail.lng}
+              name={detail.name}
+              formattedAddress={detail.formatted_address}
+            />
+          </div>
+        </section>
+      </div>
 
       <section aria-labelledby="photos-heading" className="mt-6">
         <h2
@@ -173,21 +263,7 @@ export function PlaceDetailView({ detail, bookmarkSlot }: PlaceDetailViewProps) 
         </div>
       </section>
 
-      {detail.google_maps_url ? (
-        <section className="mt-6">
-          <a
-            href={detail.google_maps_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center justify-center rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
-            aria-label="Open in Google Maps"
-          >
-            Open in Google Maps
-          </a>
-        </section>
-      ) : null}
-
-      {bookmarkSlot ? <section className="mt-2">{bookmarkSlot}</section> : null}
+      {bookmarkSlot ? <section className="mt-6">{bookmarkSlot}</section> : null}
 
       <GoogleAttribution attributions={photoAttributions} />
     </main>

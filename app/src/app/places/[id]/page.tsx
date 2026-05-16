@@ -101,12 +101,23 @@ function ServiceUnavailable() {
   );
 }
 
+// B-026 — Lightweight UUID guard (avoids a `zod` import for one check).
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export default async function PlaceDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ trip?: string | string[] }>;
 }) {
   const { id } = await params;
+  const sp = await searchParams;
+  const rawTrip = Array.isArray(sp.trip) ? sp.trip[0] : sp.trip;
+  const tripIdParam =
+    typeof rawTrip === "string" && UUID_RE.test(rawTrip) ? rawTrip : null;
+
   const result = await fetchPlaceDetail(id);
 
   if (result.kind === "not_found") {
@@ -119,7 +130,7 @@ export default async function PlaceDetailPage({
     throw new Error("place_detail_fetch_failed");
   }
 
-  const { user } = await getSessionUser();
+  const { user, supabase } = await getSessionUser();
   const bookmarkSlot = user ? (
     <BookmarkButton
       googlePlaceId={result.detail.google_place_id}
@@ -128,5 +139,44 @@ export default async function PlaceDetailPage({
     />
   ) : null;
 
-  return <PlaceDetailView detail={result.detail} bookmarkSlot={bookmarkSlot} />;
+  // B-026 — When `?trip=<uuid>` is present, look up the caller's role on
+  // that trip. Only owner/editor see the "Re-link" pill; non-members or
+  // missing rows fall through with no leak (the pill simply stays hidden).
+  let tripId: string | undefined;
+  let canRelink = false;
+  let fromPlaceId: string | undefined;
+  if (user && tripIdParam) {
+    const { data: memberRow } = await supabase
+      .from("trip_members")
+      .select("role")
+      .eq("trip_id", tripIdParam)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    const role =
+      memberRow && typeof memberRow.role === "string" ? memberRow.role : null;
+    if (role === "owner" || role === "editor") {
+      const { data: placeRow } = await supabase
+        .from("places")
+        .select("id")
+        .eq("google_place_id", result.detail.google_place_id)
+        .maybeSingle();
+      const placeUuid =
+        placeRow && typeof placeRow.id === "string" ? placeRow.id : null;
+      if (placeUuid) {
+        tripId = tripIdParam;
+        canRelink = true;
+        fromPlaceId = placeUuid;
+      }
+    }
+  }
+
+  return (
+    <PlaceDetailView
+      detail={result.detail}
+      bookmarkSlot={bookmarkSlot}
+      tripId={tripId}
+      canRelink={canRelink}
+      fromPlaceId={fromPlaceId}
+    />
+  );
 }

@@ -3252,3 +3252,133 @@ This hybrid-via-cache lets the script run independently of network when the plac
 - **Confirm `AccommodationPatchDTO` representation of "clear `place_id`."** If the current Zod schema requires `place_id` to be a string-or-omitted, [backend-engineer] must adjust to `.nullable().optional()` so the form can send `null` explicitly. Non-blocking for R2 sign-off; surfaces as a small backend change in R3.
 - **`google_place_id` vs `place_id` in the create/PATCH body.** R3 implementation choice: accept either, with a server-side resolver; or require the frontend to call `GET /api/places/[googlePlaceId]` first to warm the cache, then resolve internally. Recommendation in this doc: accept `google_place_id?` in the body and resolve server-side (single round-trip from the client). [backend-engineer] decides on shape.
 
+## B-026 Re-link bookmark/itinerary to correct Google place
+
+Sprint 7. Tier: Full (S, but auto-upgraded due to new API route + cross-cutting auth + schema change). Reserved migration: `0023_place_id_locked.sql`.
+
+### 1. Schema migration (`0023_place_id_locked.sql`)
+
+```sql
+alter table public.bookmarks
+  add column place_id_locked boolean not null default false;
+comment on column public.bookmarks.place_id_locked is
+  'B-026: true when a user manually re-linked this bookmark to the correct Google place; Trello importer must NOT overwrite place_id on subsequent runs.';
+
+alter table public.itinerary_items
+  add column place_id_locked boolean not null default false;
+comment on column public.itinerary_items.place_id_locked is
+  'B-026: true when a user manually re-linked the paired bookmark; importer leaves place_id alone.';
+
+-- AC 13 perf: relink endpoint filters by (trip_id, place_id).
+-- bookmarks already has bookmarks_trip_idx (0007) and bookmarks_place_idx (0007),
+-- but no composite. Itinerary_items has only idx_itinerary_items_place_id (0018).
+-- Add narrow composite partial indexes for the relink hot path.
+create index if not exists bookmarks_trip_place_idx
+  on public.bookmarks (trip_id, place_id);
+create index if not exists itinerary_items_trip_place_idx
+  on public.itinerary_items (trip_id, place_id)
+  where place_id is not null;
+```
+
+**No backfill needed** — `default false` covers all existing rows at `ALTER TABLE` time; column is `NOT NULL` immediately because the default is supplied.
+
+**Rollback (`0023_place_id_locked_rollback.sql`)**:
+
+```sql
+drop index if exists public.itinerary_items_trip_place_idx;
+drop index if exists public.bookmarks_trip_place_idx;
+alter table public.itinerary_items drop column if exists place_id_locked;
+alter table public.bookmarks drop column if exists place_id_locked;
+```
+
+Index audit (from `0007_bookmarks.sql` and `0018_itinerary_items_place_id.sql`): single-column indexes exist on `place_id` for both tables; no `(trip_id, place_id)` composite. The new composites are added to satisfy AC 13 (< 500ms P95).
+
+### 2. API contract — `POST /api/trips/[id]/bookmarks/relink`
+
+- **Body**: `{ from_place_id: string (uuid), to_google_place_id: string }`. `trip_id` is taken from the URL only.
+- **Auth**: `requireAuth` → 401; membership check via `trip_members` → 404 for non-member (no enumeration); `role === 'viewer'` → 403.
+- **Validation**: Zod. `to_google_place_id` matches `/^[A-Za-z0-9_-]{10,255}$/` (Google place IDs commonly start with `ChIJ` but historic IDs differ — match the existing `GooglePlaceIdParam` regex in `app/src/lib/validations/places.ts` rather than reinventing). `from_place_id` is uuid.
+- **Resolve target `places` row**: select by `google_place_id`; if absent, call `getPlaceDetails(to_google_place_id)` from `app/src/lib/google/places.ts` and insert into `places` (mirrors the cache pattern in `app/src/app/api/places/[googlePlaceId]/route.ts` lines 1-80 — re-use the same `PlaceRowSchema` mapping; do NOT duplicate the fetch+cache logic, extract a `resolveOrFetchPlace(googlePlaceId)` helper into `app/src/lib/places/resolve.ts` and call it from both routes).
+- **Atomicity**: a single Postgres function `relink_place(p_trip_id uuid, p_from_place_id uuid, p_to_place_id uuid, p_actor uuid) returns table(bookmarks_updated int, items_updated int)` invoked via `supabase.rpc('relink_place', ...)`. Inside the function:
+  1. `UPDATE bookmarks SET place_id = p_to_place_id, place_id_locked = true WHERE trip_id = p_trip_id AND place_id = p_from_place_id RETURNING id` (captured into a temp array)
+  2. Same for `itinerary_items`.
+  3. `INSERT INTO audit_log (...) SELECT ...` — batched, one statement, N rows (see §5).
+  Wrapped in the implicit function transaction. Chosen over client-side `.update()` chaining because (a) it gives true atomicity (b) audit rows are part of the same TX (c) single round-trip — best for the 500ms budget.
+- **Response 200**: `{ updated: { bookmarks: number, itinerary_items: number }, new_place_id: string (uuid) }`.
+- **Errors**: 400 invalid body; 401 unauth; 403 viewer; 404 non-member or `from_place_id` not present in trip; 502 Google fetch failure (`PlaceNotFoundError` → 404 `place_not_found`).
+- **Bounded scope**: rows touched = bookmarks-in-trip with `place_id=from` + paired itinerary items. Japan 2026 worst case ~10 rows; the new composite indexes turn each UPDATE into an index range scan over a tiny set. Comfortably < 500ms P95 even with one Google fetch on cache miss.
+
+### 3. Trello importer patch — `app/scripts/import-trello.ts`
+
+Two upsert sites are affected (confirmed by reading the file):
+
+- **Bookmark upsert** at line ~554 (`.upsert(row, { onConflict: 'trip_id,source_card_id' })`, `row` includes `place_id: null` from line 541).
+- **Labeled-itinerary upsert** at line ~591 (`.upsert(row, ...)`, `row` includes `place_id: placeId` from line 576, where `placeId` is read from the matching bookmark at line 611-616).
+
+Supabase JS does not support per-column conditional updates in a single `.upsert()` call. The simplest correct patch is: before each `.upsert()`, `SELECT place_id_locked, place_id FROM <table> WHERE trip_id = ? AND source_card_id = ?`. If the row exists and `place_id_locked = true`, **drop `place_id` from the upsert payload** (keep `title`/`notes`/`type`/`day_id`). The pre-upsert SELECT for bookmarks can be combined with the existing pre-upsert SELECT at line 596-616 (single round-trip — already there). Add the same pattern for the labeled-itinerary upsert. Net cost: one extra SELECT per labeled card (acceptable for a manual nightly script).
+
+### 4. Frontend component design
+
+- **Trigger**: `app/src/app/places/[id]/page.tsx` is the route; UI lives in `app/src/components/places/PlaceDetailView.tsx`. Add a "Wrong place? Re-link…" button in the header row next to the "Open in Google Maps" pill (B-027), visible only when `trip` context is present AND `role !== 'viewer'`.
+- **Trip-context resolution**: read `?trip=<uuid>` from `searchParams` server-side on the page; pass `tripId` + `role` down as props to `PlaceDetailView`. This is the existing convention (B-015 `BookmarkButton` and `TripPickerDialog` already accept a trip id from the surrounding context); standardising on the `?trip=` query param keeps the URL shareable and avoids referrer parsing (referrers are unreliable across cross-origin nav and same-tab refresh). When `?trip` is absent → control is hidden (AC 4).
+- **Modal**: new `app/src/components/places/RelinkPlaceDialog.tsx`. Props: `tripId`, `fromPlaceId`, `currentPlaceName`. Internals: reuse `PlaceSearchInput` from `app/src/components/places/PlaceSearchInput.tsx` (B-015) pre-filled with `currentPlaceName`. Selecting a result enables a "Re-link" primary button that POSTs to the new endpoint. Confirmation dialog text references the count of items that will be re-linked once the response returns.
+- **States**: skeleton (search results loading), error (`alert` with retry), success (toast + `router.replace('/places/<new_google_place_id>?trip=...')`).
+
+### 5. Audit logging
+
+Table is `public.audit_log` (per `0002_audit_log.sql`), columns: `actor_id, action, entity, entity_id, trip_id, metadata jsonb, created_at`. Two new `AuditAction` literals to add in `app/src/lib/audit.ts`: `bookmark_relinked`, `itinerary_item_relinked`.
+
+Per-row shape:
+```json
+{ "actor_id": "<uid>", "action": "bookmark_relinked", "entity": "bookmark",
+  "entity_id": "<bookmark.id>", "trip_id": "<trip.id>",
+  "metadata": { "from_place_id": "<uuid>", "to_place_id": "<uuid>", "to_google_place_id": "<text>" } }
+```
+
+Batch insert: inside the `relink_place` PG function, use a single `INSERT INTO audit_log (...) SELECT ... FROM unnest(@updated_ids) WITH ORDINALITY` (or build the rows from the `RETURNING` arrays of the two UPDATEs). Avoid N round-trips by NOT calling `logAudit` from TS once per row — call it once after the RPC returns for a summary log line at `level: 'audit'` (so the structured console log still fires) but the durable per-row rows are written inside the RPC. This keeps audit + mutation atomic.
+
+### 6. Security checklist (for [security-reviewer])
+
+- ✅ `trip_id` from URL only — body type omits it.
+- ✅ Role gate: membership lookup + `role in ('editor','owner')` enforced in route handler; RLS on `bookmarks`/`itinerary_items` already restricts UPDATEs to editor/owner (defence in depth).
+- ✅ `to_google_place_id` validated against `GooglePlaceIdParam` (existing regex) before reaching Google proxy → no SSRF (no URL ever built from raw input; the value is appended to a hard-coded Google endpoint inside `getPlaceDetails`).
+- ✅ `from_place_id` must exist in this trip (the RPC's `WHERE trip_id = $1 AND place_id = $2` is the guard — if zero rows match, return 404 `from_place_not_in_trip`; do not 200 with `updated: 0`).
+- ✅ Rate limit: per-user `bookmarks:relink:user:<uid>` at 10 / 60s via `checkRateLimit` (`app/src/lib/rate-limit.ts`). Mirrors the `places:details:user:<uid>` limiter used in `app/src/app/api/places/[googlePlaceId]/route.ts`.
+- ✅ Audit row inserted regardless of cache hit/miss for the target place.
+- ✅ No PII in metadata (only UUIDs + place ID string).
+
+### 7. R2 Query Performance Checklist
+
+- **Q-1 bounded**: RPC updates by `(trip_id, place_id)` — naturally bounded to single-digit rows. Not a list endpoint.
+- **Q-2 no N+1**: single RPC call, single `SELECT places`, optional single `getPlaceDetails`. No per-row queries.
+- **Q-3 pagination**: N/A — endpoint returns counts only.
+- **Q-4 date-bounded**: N/A — no analytics aggregation.
+
+### 8. Files to create/edit
+
+**Backend (R3 — [backend-engineer])**
+- `app/supabase/migrations/0023_place_id_locked.sql` (new)
+- `app/supabase/migrations/0023_place_id_locked_rollback.sql` (new)
+- `app/supabase/migrations/0023_place_id_locked.sql` ALSO defines `create or replace function public.relink_place(...)` + grants; OR a sibling `0023b_relink_rpc.sql` if rollback boundaries cleaner. Recommend single file.
+- `app/src/app/api/trips/[id]/bookmarks/relink/route.ts` (new)
+- `app/src/lib/validations/places.ts` — add `RelinkBodySchema`
+- `app/src/lib/places/resolve.ts` (new) — extracted `resolveOrFetchPlace` helper; refactor the existing `[googlePlaceId]/route.ts` GET to call it.
+- `app/src/lib/audit.ts` — extend `AuditAction` union with `bookmark_relinked`, `itinerary_item_relinked`.
+- `app/scripts/import-trello.ts` — patch bookmark upsert (~line 554) and labeled-item upsert (~line 591) to respect `place_id_locked`.
+
+**Frontend (R3 — [frontend-engineer])**
+- `app/src/components/places/RelinkPlaceDialog.tsx` (new)
+- `app/src/components/places/PlaceDetailView.tsx` — add trigger button (header row, next to B-027 "Open in Google Maps" pill)
+- `app/src/app/places/[id]/page.tsx` — read `?trip` searchParam, resolve role via `trip_members`, pass props down.
+
+**Tests (R5 — [test-engineer])**
+- `app/src/__tests__/api/bookmarks-relink.test.ts` — happy path, viewer 403, non-member 404, body trip_id ignored, RPC atomicity (failure rolls back).
+- `app/e2e/relink-place.spec.ts` — Japan 2026 LA→Tokyo case end-to-end (mocked Google).
+- `app/src/__tests__/scripts/import-trello-respects-lock.test.ts` — regression for the importer patch.
+
+### 9. Sequencing
+
+- **Backend first** for the migration + `resolveOrFetchPlace` helper + route handler skeleton + Zod schema (~30% of R3). Frontend can fork in parallel as soon as the API contract above is final (it is — this section is the contract). [frontend-engineer] starts building `RelinkPlaceDialog.tsx` against the documented contract; [backend-engineer] finishes the RPC and audit batching.
+- The importer patch is independent — either engineer can pick it up; assign to [backend-engineer] since it edits `scripts/`.
+- [solution-architect] returns at sprint close to update §B-026 here with any deltas from R3/R4.
+
