@@ -6,6 +6,7 @@ import {
   CreateItineraryItemInput,
   ItineraryItemRowSchema,
   ItineraryItemType,
+  ItineraryItemWithPlaceRowSchema,
 } from '@/lib/validations/itinerary-items';
 import { TransportationRowSchema } from '@/lib/validations/transportation';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
@@ -100,9 +101,17 @@ export async function GET(
     const from = (page - 1) * limit;
     const to = from + limit - 1;
 
+    // B-015: embed the cached `places` row via PostgREST FK syntax. PostgREST
+    // resolves this as a single LEFT JOIN on `itinerary_items_place_id_fkey`
+    // (one query, no N+1 — see SOLUTION_DESIGN.md §B-015.7). `place` is
+    // `{ id, lat, lng, name } | null` per item; we further normalise to null
+    // when coords are missing so the map can plot without branching.
     let query = supabase
       .from('itinerary_items')
-      .select('*', { count: 'exact' })
+      .select(
+        '*, place:places!itinerary_items_place_id_fkey ( id, lat, lng, name )',
+        { count: 'exact' },
+      )
       .eq('trip_id', id);
     if (dayIdFilter !== null) query = query.eq('day_id', dayIdFilter);
     if (typeFilter !== null) query = query.eq('type', typeFilter);
@@ -113,11 +122,23 @@ export async function GET(
       .range(from, to);
     if (error) return serverError();
 
-    const itemsParsed = ItineraryItemRowSchema.array().safeParse(data ?? []);
+    const itemsParsed = ItineraryItemWithPlaceRowSchema.array().safeParse(
+      data ?? [],
+    );
     if (!itemsParsed.success) return serverError();
 
+    // Normalise: any embedded place lacking coords becomes `null` so the map
+    // can rely on `place != null` to mean "plottable".
+    const items = itemsParsed.data.map((row) => ({
+      ...row,
+      place:
+        row.place && row.place.lat !== null && row.place.lng !== null
+          ? row.place
+          : null,
+    }));
+
     return NextResponse.json({
-      items: itemsParsed.data,
+      items,
       page,
       limit,
       total: count ?? 0,
@@ -249,6 +270,7 @@ export async function POST(
         notes: input.notes ?? null,
         cost: input.cost ?? null,
         currency: input.currency ?? null,
+        place_id: input.place_id ?? null,
         created_by: auth.user.id,
       })
       .select('*')

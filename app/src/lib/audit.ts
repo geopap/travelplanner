@@ -38,7 +38,11 @@ export type AuditAction =
   | 'profile.update'
   | 'expense.create'
   | 'expense.update'
-  | 'expense.delete';
+  | 'expense.delete'
+  | 'import_extract'
+  | 'import_extract_failed'
+  | 'import_saved'
+  | 'import_rate_limited';
 
 export interface AuditParams {
   actorId: string | null;

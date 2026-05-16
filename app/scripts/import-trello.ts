@@ -224,12 +224,18 @@ export function classify(card: TrelloCard): LabelKind {
   }
 }
 
+// Order matters: explicit modes (bus/train/ferry/car) are evaluated BEFORE
+// flight/airport so phrases like "Bus to airport" or "Train to Narita Airport"
+// classify by the vehicle, not the destination. The bare "airport" keyword is
+// kept last as a weak signal — it only matches when no explicit mode does
+// (e.g. "Airport transfer" falls through to 'other' because no flight-specific
+// verb is present). See B-020.
 const TRANSPORT_KEYWORDS: ReadonlyArray<readonly [RegExp, TransportMode]> = [
-  [/\b(flight|fly|airline|airport)\b/i, 'flight'],
-  [/\b(train|shinkansen|jr |rail)\b/i, 'train'],
   [/\bbus\b/i, 'bus'],
+  [/\b(train|shinkansen|jr |rail)\b/i, 'train'],
   [/\bferry\b/i, 'ferry'],
   [/\b(car|drive|rental)\b/i, 'car'],
+  [/\b(flight|fly|airline)\b/i, 'flight'],
 ];
 
 export function inferTransportMode(name: string): TransportMode {

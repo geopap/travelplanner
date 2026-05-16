@@ -233,6 +233,16 @@ describe('inferTransportMode', () => {
   ] as const)('"%s" → %s', (name, expected) => {
     expect(inferTransportMode(name)).toBe(expected);
   });
+
+  // B-020: explicit mode keywords must win over "airport" destination noise.
+  it.each([
+    ['Bus to airport', 'bus'],
+    ['Train to Narita Airport', 'train'],
+    ['Flight to Tokyo', 'flight'],
+    ['Airport transfer', 'other'],
+  ] as const)('B-020 priority: "%s" → %s', (name, expected) => {
+    expect(inferTransportMode(name)).toBe(expected);
+  });
 });
 
 // ---------------------------------------------------------------------------

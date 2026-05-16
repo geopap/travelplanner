@@ -198,6 +198,14 @@ export function TripOverview({ tripId }: TripOverviewProps) {
           </Link>
           {canEdit && (
             <Link
+              href={`/trips/${trip.id}/import`}
+              className={secondaryButtonClass}
+            >
+              Import
+            </Link>
+          )}
+          {canEdit && (
+            <Link
               href={`/trips/${trip.id}/edit`}
               className={secondaryButtonClass}
             >

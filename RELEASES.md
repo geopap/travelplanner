@@ -4,13 +4,48 @@ Local reference copy. Source of truth: GitHub Releases.
 
 ---
 
-## v0.4.0 — Sprint 4: Money, Profiles, Japan import (2026-04-28)
+## v0.5.0 — Day-view map, social-media import (2026-05-16)
 
-Sprint 4 adds per-trip expense tracking with per-member balance computation, a full profile management page with avatar upload, and a one-shot Trello import script that seeds the 26-day Japan 2026 trip.
+Closes Phase A by shipping the Leaflet-based day-view map and delivers the first Phase B feature — social-media URL/text import with Claude-Haiku-powered place extraction. Also clears the Sprint 4 carry-over transport-keyword bug.
+
+### Highlights
+- **B-015 Leaflet map — day view** — Collapsible map section on each day card rendering markers for itinerary items with linked places. Auto-fit bounds, OSM tiles + attribution, SSR-safe via `next/dynamic({ ssr: false })`. Place picker added to the item form (non-transport types) using the existing `<PlaceSearchInput>` + Places cache. Collapse state persisted per (trip, day) in `localStorage`. Read-only for viewer role.
+- **B-020 `inferTransportMode` keyword priority fix** — Sprint 4 carry-over. Reordered `TRANSPORT_KEYWORDS` so bus/train/ferry/car evaluate before flight; removed `airport` from the flight regex so "Bus to airport" correctly returns `bus` and "Airport transfer" falls through to `other`. 4 parametrised regression tests added.
+- **B-021 Social-media import** — `POST /api/trips/[id]/import/extract` accepts a URL (YouTube transcript → cheerio meta fallback; X/Twitter via oEmbed; generic web OG-scrape with SSRF-guarded `safeFetch`) or pasted text (e.g. Instagram/TikTok captions), runs Claude Haiku 4.5 with forced tool-use for structured extraction, persists an `import_sources` row, and returns places + tips for user review. `POST /api/trips/[id]/import/[sourceId]/save` resolves each place against the Places cache and batch-inserts `bookmarks` (with `import_source_id` back-link); optionally creates a single "Tips from <hostname>" note on day 1. `GET /api/trips/[id]/import/[sourceId]` powers the review-screen deep-link. Rate limit 20/hr/user, 24h duplicate-URL guard, zero-results guard, editor-gated.
+
+### Database
+- Migration `0017_import_sources.sql`: new `import_sources` table (id, trip_id, source_type, source_url, raw_text, status, extracted_json, created_by) + RLS (viewer SELECT; editor INSERT/UPDATE/DELETE with `created_by = auth.uid()` on INSERT) + `bookmarks.import_source_id` nullable FK (ON DELETE SET NULL). Rollback: `0017_import_sources_rollback.sql`.
+- Migration `0018_itinerary_items_place_id.sql`: `itinerary_items.place_id uuid null references places(id) on delete set null` + partial index `idx_itinerary_items_place_id`. Rollback: `0018_itinerary_items_place_id_rollback.sql`.
+- Migration `0019_import_sources_recent_url_idx.sql`: partial composite index `import_sources_trip_url_recent_idx(trip_id, source_url, created_at desc) where source_url is not null` — backs the AC-12 duplicate-URL guard. Rollback: `0019_import_sources_recent_url_idx_rollback.sql`.
+
+### Security
+- **SSRF guard** (`app/src/lib/extract/sources.ts` `safeFetch`): blocks non-http(s) schemes; rejects literal-IP URLs in loopback / link-local (incl. `169.254.169.254`) / RFC1918 / CGNAT / multicast / reserved ranges (IPv4) and `::`/`::1`/`fc00::/7`/`fe80::/10`/`ff00::/8` (IPv6); DNS-resolves hostnames and blocks if ANY resolved address is in a blocked range (rebinding defence); walks redirects manually with re-validation at each hop (`MAX_REDIRECTS=3`); 10s `AbortController` timeout.
+- Prompt-injection bounded by forced `tool_use` + strict zod schema validation; injected content rendered as plain text only (no `dangerouslySetInnerHTML`).
+- `ANTHROPIC_API_KEY` server-side only; never returned in responses or error bodies.
+
+### Quality
+- 686/686 vitest tests passing (+102 new this sprint: 16 `safe-fetch.test.ts`, 25 `import-extract`, 18 `import-save`, 11 `import-get`, 7 `claude-extract`, 14 `items-with-place`, 7 `day-map-section`, plus minor fixture updates).
+- 0 CRITICAL/HIGH R4 findings outstanding (1 CRITICAL SSRF + 1 HIGH index from security-reviewer remediated in R4; 3 R4 LOW/MEDIUM findings on B-015 remediated post-UAT).
+- `tsc --noEmit` clean; `next build` green.
+- All 3 items UAT PASS.
+
+### New environment variables
+- `ANTHROPIC_API_KEY` — server-side only; required for B-021 `/extract`.
+
+### Known follow-ups (deferred)
+- B-021 `save/route.ts` three-write atomicity (bookmarks → note → status flip) — documented with inline comment; will migrate to a single RPC when invited-members ship.
+- In-memory rate limit will need Postgres/Upstash backing once multi-user activation occurs.
+- B-021 `import_duplicate_blocked` audit entry — trivial, deferred.
+
+---
+
+## v0.4.0 — Budget & expenses, profiles, Trello import (2026-04-28)
+
+Adds per-trip expense tracking with per-member balance computation, a full profile management page with avatar upload, and a Trello import script that hydrates a trip from a Trello export JSON.
 
 ### Highlights
 - **B-014 Budget & expenses** — New `expenses` table (trip-scoped, role-gated). 6 endpoints: `POST/GET /api/trips/[id]/expenses` (paginated), `GET/PATCH/DELETE /api/trips/[id]/expenses/[expenseId]`, `GET /api/trips/[id]/expenses/balances`. Per-member balance computation via `get_trip_balances` RPC. `get_trip_expense_total` RPC for budget overview widget. All mutations audit-logged. Viewer role read-only enforced at RLS + app layer.
-- **B-016 Japan 2026 Trello import script** — One-shot importer at `app/scripts/import-trello.ts`. Supports `--dry-run` mode; idempotent via `source_card_id` column on items/accommodations/bookmarks. Migrates checklist items as itinerary sub-items, attachments as notes, labels as categories. Covers the full 26-day Japan trip from a Trello export JSON.
+- **B-016 Trello import script** — Importer at `app/scripts/import-trello.ts` with `--dry-run` mode. Idempotent via `source_card_id` column on items/accommodations/bookmarks. Migrates checklist items as itinerary sub-items, attachments as notes, labels as categories.
 - **B-017 Profile management** — `/settings/profile` page with display name + bio editing, avatar upload/replace/delete via Supabase Storage (`avatars` bucket). `PATCH /api/profile` endpoint. Member lists across all trip views now render avatar thumbnails with initials fallback.
 
 ### Database
@@ -121,6 +156,6 @@ First tagged release. Authenticated trip planner skeleton with day-by-day itiner
 - Transportation + accommodations structured fields.
 - Trip-member invitations.
 - Leaflet day map.
-- Japan 2026 Trello import script.
+- Trello import script.
 - Playwright e2e.
 - Upstash distributed rate limiting.

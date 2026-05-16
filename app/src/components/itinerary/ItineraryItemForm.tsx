@@ -31,6 +31,9 @@ import {
   type TransportFieldErrors,
   type TransportFieldsValue,
 } from "./TransportFields";
+import { PlaceSearchInput } from "@/components/places/PlaceSearchInput";
+import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import type { PlaceSearchResult } from "@/lib/hooks/usePlaceSearch";
 
 interface ItineraryItemFormProps {
   mode: "create" | "edit";
@@ -113,6 +116,22 @@ export function ItineraryItemForm({
     return emptyTransportFieldsValue(tripBaseCurrency);
   });
 
+  // B-015 — Optional place link. Initialised from the embedded `place` (when
+  // editing an item that already has one). The picker resolves the user's
+  // selection to a `places.id` UUID via the cache (RLS allows authenticated
+  // SELECT on `public.places`).
+  const [linkedPlace, setLinkedPlace] = useState<{
+    place_id: string;
+    name: string;
+  } | null>(
+    initial && initial.place_id && initial.place
+      ? { place_id: initial.place_id, name: initial.place.name }
+      : null,
+  );
+  const [placePickerOpen, setPlacePickerOpen] = useState(false);
+  const [placeResolving, setPlaceResolving] = useState(false);
+  const [placeError, setPlaceError] = useState<string | null>(null);
+
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [transportErrors, setTransportErrors] = useState<TransportFieldErrors>(
     {},
@@ -134,6 +153,56 @@ export function ItineraryItemForm({
   }, [onClose, submitting]);
 
   const isTransport = type === "transport";
+
+  /**
+   * B-015 — Resolve a Google place selection to a `places.id` UUID.
+   * Strategy:
+   *   1. Hit `GET /api/places/[googlePlaceId]` so the cache is warm (server-side
+   *      proxy upserts on miss).
+   *   2. Look up the UUID via the browser Supabase client. `places` is readable
+   *      by any authenticated user (RLS policy `places_select_authenticated`).
+   * If anything fails, keep the form usable — surface a small error but don't
+   * block submission (the link is optional).
+   */
+  async function onPickPlace(selected: PlaceSearchResult): Promise<void> {
+    setPlaceError(null);
+    setPlaceResolving(true);
+    try {
+      // 1. Warm the cache. The proxy returns 200 with the row OR a fallback
+      // shape; either way the `places` row is upserted server-side.
+      await apiFetch<unknown>(
+        `/api/places/${encodeURIComponent(selected.google_place_id)}`,
+        { method: "GET" },
+      ).catch(() => {
+        // Cache warm is best-effort; the lookup below still works if the row
+        // was previously cached.
+      });
+
+      const sb = createSupabaseBrowserClient();
+      const { data, error } = await sb
+        .from("places")
+        .select("id,name")
+        .eq("google_place_id", selected.google_place_id)
+        .maybeSingle<{ id: string; name: string }>();
+      if (error || !data) {
+        setPlaceError(
+          "Could not link that place. Open it from Places once, then try again.",
+        );
+        return;
+      }
+      setLinkedPlace({ place_id: data.id, name: data.name });
+      setPlacePickerOpen(false);
+    } catch {
+      setPlaceError("Could not link that place. Please try again.");
+    } finally {
+      setPlaceResolving(false);
+    }
+  }
+
+  function clearLinkedPlace(): void {
+    setLinkedPlace(null);
+    setPlaceError(null);
+  }
 
   function buildTransportPayload(): {
     payload?: TransportationInsertDTO;
@@ -254,13 +323,25 @@ export function ItineraryItemForm({
     try {
       // Build the discriminated-union body. Transport variant nests the sub-object
       // and never sends cost/currency on the parent (AC-10).
-      const baseBody = {
+      const baseBody: Record<string, unknown> = {
         title: trimmedTitle,
         day_id: dayId,
         start_time: startIso,
         end_time: endIso,
         notes: notes.trim() || null,
       };
+      // B-015 — include `place_id` only when the user explicitly changed it,
+      // and only for non-transport items (the transport RPC ignores it; the
+      // picker is hidden for transport anyway).
+      if (!isTransport) {
+        if (mode === "create") {
+          if (linkedPlace) baseBody.place_id = linkedPlace.place_id;
+        } else {
+          const previous = initial?.place_id ?? null;
+          const current = linkedPlace?.place_id ?? null;
+          if (previous !== current) baseBody.place_id = current;
+        }
+      }
 
       let body: Record<string, unknown>;
       if (isTransport) {
@@ -432,6 +513,74 @@ export function ItineraryItemForm({
                 />
               </FormField>
             </div>
+
+            {/* B-015 — Optional place link. Hidden for transport (use dep/arr
+                locations instead). Resolves via /api/places + browser Supabase
+                lookup; selection is best-effort and never blocks submit. */}
+            {!isTransport && (
+              <div>
+                <span className="block text-sm font-medium text-zinc-800 dark:text-zinc-200 mb-1.5">
+                  Place{" "}
+                  <span className="font-normal text-zinc-500">
+                    (optional — shows a pin on the day map)
+                  </span>
+                </span>
+                {linkedPlace && !placePickerOpen ? (
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 px-3 py-2 text-sm">
+                    <span className="truncate text-zinc-900 dark:text-zinc-100">
+                      📍 {linkedPlace.name}
+                    </span>
+                    <div className="flex gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setPlacePickerOpen(true)}
+                        disabled={submitting}
+                        className="text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+                      >
+                        Change
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearLinkedPlace}
+                        disabled={submitting}
+                        className="text-xs font-medium text-red-600 dark:text-red-400 hover:underline"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ) : placePickerOpen || !linkedPlace ? (
+                  <div className="space-y-2">
+                    <PlaceSearchInput
+                      onSelect={(p) => {
+                        void onPickPlace(p);
+                      }}
+                      placeholder="Search for a place…"
+                    />
+                    {placeResolving && (
+                      <p className="text-xs text-zinc-500">Linking place…</p>
+                    )}
+                    {placeError && (
+                      <p
+                        role="alert"
+                        className="text-xs text-red-600 dark:text-red-400"
+                      >
+                        {placeError}
+                      </p>
+                    )}
+                    {linkedPlace && placePickerOpen && (
+                      <button
+                        type="button"
+                        onClick={() => setPlacePickerOpen(false)}
+                        className="text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:underline"
+                      >
+                        Cancel change
+                      </button>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            )}
 
             {/* Cost/currency hidden for transport — they live on the transportation row. */}
             {!isTransport && (

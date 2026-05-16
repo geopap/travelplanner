@@ -10,6 +10,8 @@ TravelPlanner is a personal travel planning app. Users create trips, define date
 
 **Personal-project scope**: No analytics/tracking, no marketing/SEO/content, no user manual. Single environment (Vercel production). The user is the sole user and the sole UAT tester.
 
+**Public/private split**: The public repo (`geopap/travelplanner`) holds the app, schema, PRD, and SOLUTION_DESIGN. Personal planning/operations docs — `SPRINT.md`, `SPRINT_ARCHIVE.md`, `BACKLOG.md`, `app/docs/uat/sprint-*` — live in the private companion repo `geopap/travelplanner-private`, cloned locally into `./private/` (gitignored). **All references to those filenames in this document refer to `private/<filename>`** (e.g. "update SPRINT.md" means `private/SPRINT.md`). Agents read/write them only via the `private/` path.
+
 ## Git
 
 When using git, always use `/usr/bin/git` (system git) instead of Homebrew git to avoid libcurl compatibility issues. If `git push` fails with a curl error, immediately fall back to `/usr/bin/git push` or `gh` CLI without asking.

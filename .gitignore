@@ -46,3 +46,7 @@ app/supabase/.temp/
 
 # Onboarding reference data — kept out of git, still in working tree
 onboarding/
+
+# Private companion repo — clone of geopap/travelplanner-private
+# Holds SPRINT.md, SPRINT_ARCHIVE.md, BACKLOG.md, app/docs/uat/, seed JSON.
+private/

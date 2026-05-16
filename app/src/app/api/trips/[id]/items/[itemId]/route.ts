@@ -187,6 +187,7 @@ export async function PATCH(
         'notes',
         'cost',
         'currency',
+        'place_id',
       ] as const) {
         if (input[key] !== undefined) itemPatch[key] = input[key];
       }

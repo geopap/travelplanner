@@ -41,7 +41,14 @@ export type ApiErrorCode =
   | 'invalid_currency'
   | 'date_out_of_range'
   | 'member_not_in_trip'
-  | 'share_pct_invalid';
+  | 'share_pct_invalid'
+  | 'unsupported_source'
+  | 'source_fetch_failed'
+  | 'llm_unavailable'
+  | 'extraction_empty'
+  | 'duplicate_recent_import'
+  | 'import_source_not_found'
+  | 'import_already_saved';
 
 export type ApiErrorDetails = Record<string, unknown>;
 
