@@ -4,6 +4,38 @@ Local reference copy. Source of truth: GitHub Releases.
 
 ---
 
+## v0.6.0 — Day-view completeness: Trello items, hotel markers, interactive chips (2026-05-16)
+
+Makes the day view the canonical "what's happening today" surface. Promotes labeled Trello cards to day items (B-022, with a one-shot `--backfill` against the Japan 2026 trip), adds hotel markers + place-enrichment to the day-view map (B-023), and turns the accommodation indicator chips into interactive entry points (B-024). Bundles four out-of-sprint commits (transport CRUD page, budget total includes bookings, expense auto-sync from bookings) that landed on the branch between v0.5.0 and S6 start.
+
+### Highlights
+- **B-022 Day-anchor labeled Trello imports** — Restaurants → `meal`; Attractions/Museums/Shopping → `activity`. Same-pass `place_id` lookup from the paired bookmark; idempotent via `(trip_id, source_card_id)`. `--backfill` walks existing bookmarks and inserts missing items; `--backfill --dry-run` emits stable `[plan]` lines.
+- **B-023 Accommodations on day map + hotel enrichment** — New endpoint `GET /api/trips/[id]/days/[dayId]/map` returning `{ items, accommodations }` in one round-trip. `<AccommodationForm>` gains an optional place picker; backend resolves `google_place_id` → internal `places.id` via a new shared `lib/supabase/place-resolver.ts`. One-shot CLI script `enrich-accommodations.ts` applies a conservative 3-of-3 confidence rule (substring + `business_status='OPERATIONAL'` + top-2 disambiguation) to bulk-link hotels.
+- **B-024 Interactive accommodation indicators** — Chips on each day card are now `<button>`s that open a detail modal with full hotel info, Edit (reuses `AccommodationForm`), and Delete (reuses `RemoveAccommodationDialog`). Mobile bottom sheet < 640 px; focus trap + Esc-close + focus-return. Multi-chip days each open their own modal keyed by `accommodation_id`.
+- **B-025 Expense test repair** — Pure fixture fix; restored the suite from 682 + 11 failing to green.
+- **Out-of-sprint bundle** — Trip-level Manage Transport page (B-?). Budget `total_spent` now includes accommodation/transport/itinerary-item costs. New `expenses.source_kind` / `source_id` columns + per-table triggers that auto-sync booking costs into the expenses list.
+
+### Database
+- Migration `0020_budget_includes_bookings.sql` (from out-of-sprint commit `b4bc4a2`): `get_trip_expense_total` RPC widened to include accommodation / transportation / itinerary-item costs from base-currency rows. Rollback: `0020_budget_includes_bookings_rollback.sql`.
+- Migration `0021_expenses_from_bookings.sql` (from out-of-sprint commit `56b07c1`): new `expenses.source_kind` + `source_id` columns + unique partial index `(source_kind, source_id) where source_kind is not null`; new trigger functions on `accommodations`, `transportation`, `itinerary_items` that INSERT/UPDATE/DELETE the matching expense row; `get_trip_expense_total` reverted to expenses-only since bookings now flow through expenses (avoids double-count); backfill block at end. Rollback: `0021_expenses_from_bookings_rollback.sql`.
+- B-022 / B-023 / B-024 introduce **no migrations** (`itinerary_items.place_id` from S5/0018 + `accommodations.place_id` from S3/0009 + `bookmarks.source_card_id` from S4/0011 cover the schema needs).
+
+### Quality
+- 758/758 vitest tests passing (+65 new this sprint across B-022, B-023, B-024, B-025 fixes).
+- 0 CRITICAL / 0 HIGH R4 findings outstanding (B-022: 2 HIGH unsafe-cast remediated; B-024: 1 HIGH a11y boundary remediated; B-023: 3 MEDIUM remediated).
+- `tsc --noEmit` clean; `next build` green.
+- All 4 items UAT PASS.
+
+### New environment variables
+- None for S6 items themselves. The B-023 enrichment script reads existing `SUPABASE_SERVICE_ROLE_KEY`. Optional `ENRICH_BASE_URL` and `ENRICH_SESSION_COOKIE` for the network-fallback proxy path.
+
+### Known follow-ups (deferred)
+- `place-resolver.ts` is now a shared module; per CLAUDE.md Shared File Governance, future dependents should pass through R2 architecture review.
+- LOWs not addressed: module-level `ACCOMMODATION_ICON` singleton in `DayMap.tsx`; `day-map-section.test.ts` `plottable` mirror slightly stricter than `toMapItems`.
+- Ownership-transfer flow — still un-filed; carried forward.
+
+---
+
 ## v0.5.0 — Day-view map, social-media import (2026-05-16)
 
 Closes Phase A by shipping the Leaflet-based day-view map and delivers the first Phase B feature — social-media URL/text import with Claude-Haiku-powered place extraction. Also clears the Sprint 4 carry-over transport-keyword bug.
