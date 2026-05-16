@@ -254,6 +254,23 @@ export function TripOverview({ tripId }: TripOverviewProps) {
 
       <AccommodationsSummary tripId={trip.id} canEdit={canEdit} />
 
+      {canEdit && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Link
+            href={`/trips/${trip.id}/transportation`}
+            className={secondaryButtonClass}
+          >
+            Manage transport
+          </Link>
+          <Link
+            href={`/trips/${trip.id}/accommodations`}
+            className={secondaryButtonClass}
+          >
+            Manage accommodations
+          </Link>
+        </div>
+      )}
+
       {canDelete && (
         <div className="mt-10 rounded-2xl border border-red-200 dark:border-red-900 bg-red-50/40 dark:bg-red-950/30 p-5">
           <h2 className="text-sm font-semibold text-red-800 dark:text-red-200">

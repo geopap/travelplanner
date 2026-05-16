@@ -318,11 +318,9 @@ export function TransportationTabClient({
                       >
                         {meta.label}
                       </span>
-                      {(row.carrier || (row.mode === "flight" && row.flight_number)) && (
+                      {row.carrier && (
                         <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
-                          {row.mode === "flight" && row.flight_number && row.carrier
-                            ? `${row.carrier} · ${row.flight_number}`
-                            : (row.carrier ?? row.flight_number)}
+                          {row.carrier}
                         </span>
                       )}
                       {row.confirmation && (

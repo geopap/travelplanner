@@ -19,11 +19,7 @@ import {
   labelToItineraryType,
   planBackfillCard,
   categoryToItemType,
-  isBookmarkPlaceIdLocked,
-  isItineraryPlaceIdLocked,
-  computeDiagnostic,
   type Summary,
-  type DiagnosticRow,
 } from '../../scripts/import-trello';
 
 // ---------------------------------------------------------------------------
@@ -93,8 +89,6 @@ describe('parseArgs', () => {
       userEmail: 'me@example.com',
       dryRun: false,
       backfill: false,
-      diagnose: false,
-      tripId: null,
     });
   });
 
@@ -103,8 +97,6 @@ describe('parseArgs', () => {
       userEmail: 'me@example.com',
       dryRun: false,
       backfill: false,
-      diagnose: false,
-      tripId: null,
     });
   });
 
@@ -113,8 +105,6 @@ describe('parseArgs', () => {
       userEmail: 'a@b.co',
       dryRun: true,
       backfill: false,
-      diagnose: false,
-      tripId: null,
     });
   });
 
@@ -123,8 +113,6 @@ describe('parseArgs', () => {
       userEmail: 'a@b.co',
       dryRun: false,
       backfill: true,
-      diagnose: false,
-      tripId: null,
     });
   });
 
@@ -133,8 +121,6 @@ describe('parseArgs', () => {
       userEmail: 'a@b.co',
       dryRun: true,
       backfill: true,
-      diagnose: false,
-      tripId: null,
     });
   });
 
@@ -157,8 +143,6 @@ describe('parseArgs', () => {
       userEmail: 'a@b.co',
       dryRun: true,
       backfill: false,
-      diagnose: false,
-      tripId: null,
     });
   });
 
@@ -167,67 +151,12 @@ describe('parseArgs', () => {
       userEmail: 'a@b.co',
       dryRun: true,
       backfill: true,
-      diagnose: false,
-      tripId: null,
     });
     expect(parseArgs(['--backfill', '--user-email=a@b.co', '--dry-run'])).toEqual({
       userEmail: 'a@b.co',
       dryRun: true,
       backfill: true,
-      diagnose: false,
-      tripId: null,
     });
-  });
-
-  // B-030 — diagnostic flag + optional --trip-id override.
-  it('--diagnose flag toggles', () => {
-    expect(parseArgs(['--user-email', 'a@b.co', '--diagnose'])).toEqual({
-      userEmail: 'a@b.co',
-      dryRun: false,
-      backfill: false,
-      diagnose: true,
-      tripId: null,
-    });
-  });
-
-  it('--trip-id value form', () => {
-    expect(
-      parseArgs([
-        '--user-email',
-        'a@b.co',
-        '--diagnose',
-        '--trip-id',
-        '11111111-1111-4111-8111-111111111111',
-      ]),
-    ).toEqual({
-      userEmail: 'a@b.co',
-      dryRun: false,
-      backfill: false,
-      diagnose: true,
-      tripId: '11111111-1111-4111-8111-111111111111',
-    });
-  });
-
-  it('--trip-id=value form', () => {
-    expect(
-      parseArgs([
-        '--user-email=a@b.co',
-        '--diagnose',
-        '--trip-id=22222222-2222-4222-8222-222222222222',
-      ]),
-    ).toEqual({
-      userEmail: 'a@b.co',
-      dryRun: false,
-      backfill: false,
-      diagnose: true,
-      tripId: '22222222-2222-4222-8222-222222222222',
-    });
-  });
-
-  it('throws when --trip-id has no value', () => {
-    expect(() =>
-      parseArgs(['--user-email', 'a@b.co', '--diagnose', '--trip-id']),
-    ).toThrow(/--trip-id/);
   });
 });
 
@@ -607,276 +536,5 @@ describe('pairHotels', () => {
     );
     expect(pairs).toHaveLength(0);
     expect(summary.skipped).toBe(1);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 9. B-026 place_id_locked guards — bookmarks + itinerary_items.
-// ---------------------------------------------------------------------------
-
-describe('isBookmarkPlaceIdLocked / isItineraryPlaceIdLocked (B-026)', () => {
-  function makeCtx(
-    lockedValue: boolean | null,
-    table: 'bookmarks' | 'itinerary_items',
-    fromCalls: string[] = [],
-    errorMsg: string | null = null,
-  ): {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ctx: any;
-    fromCalls: string[];
-  } {
-    const eqArgs: Array<[string, string]> = [];
-    const client = {
-      from: (t: string) => {
-        fromCalls.push(t);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const chain: any = {
-          select: () => chain,
-          eq: (col: string, val: string) => {
-            eqArgs.push([col, val]);
-            return chain;
-          },
-          maybeSingle: async () => {
-            if (errorMsg) return { data: null, error: { message: errorMsg } };
-            if (t !== table) return { data: null, error: null };
-            return lockedValue === null
-              ? { data: null, error: null }
-              : { data: { place_id_locked: lockedValue }, error: null };
-          },
-        };
-        return chain;
-      },
-    };
-    return {
-      ctx: {
-        client,
-        tripId: 'trip-1',
-        ownerId: 'user-1',
-        daysByDate: new Map(),
-        dryRun: false,
-        summary: makeSummary(),
-      },
-      fromCalls,
-    };
-  }
-  const card = makeCard({ id: 'card-X', name: 'Pinned Place' });
-
-  it('returns true when bookmarks row exists with place_id_locked=true', async () => {
-    const { ctx } = makeCtx(true, 'bookmarks');
-    expect(await isBookmarkPlaceIdLocked(ctx, card)).toBe(true);
-  });
-
-  it('returns false when bookmarks row has place_id_locked=false', async () => {
-    const { ctx } = makeCtx(false, 'bookmarks');
-    expect(await isBookmarkPlaceIdLocked(ctx, card)).toBe(false);
-  });
-
-  it('returns false when no bookmarks row exists for the card', async () => {
-    const { ctx } = makeCtx(null, 'bookmarks');
-    expect(await isBookmarkPlaceIdLocked(ctx, card)).toBe(false);
-  });
-
-  it('throws when the bookmarks lock-check select returns an error', async () => {
-    const { ctx } = makeCtx(null, 'bookmarks', [], 'boom');
-    await expect(isBookmarkPlaceIdLocked(ctx, card)).rejects.toThrow(
-      /bookmarks lock-check/,
-    );
-  });
-
-  it('returns true for itinerary_items when locked', async () => {
-    const { ctx } = makeCtx(true, 'itinerary_items');
-    expect(await isItineraryPlaceIdLocked(ctx, card)).toBe(true);
-  });
-
-  it('returns false for itinerary_items when no row exists', async () => {
-    const { ctx } = makeCtx(null, 'itinerary_items');
-    expect(await isItineraryPlaceIdLocked(ctx, card)).toBe(false);
-  });
-
-  it('throws when the itinerary_items lock-check returns an error', async () => {
-    const { ctx } = makeCtx(null, 'itinerary_items', [], 'kaboom');
-    await expect(isItineraryPlaceIdLocked(ctx, card)).rejects.toThrow(
-      /itinerary_items lock-check/,
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// B-030 — diagnostic aggregation (read-only branch-decision helper).
-// computeDiagnostic is a pure function — given the Trello cardId→date map
-// plus raw bookmarks/items lists, produce the per-date table with `gap`.
-// ---------------------------------------------------------------------------
-
-describe('computeDiagnostic (B-030)', () => {
-  const cardIdToDate = new Map<string, string>([
-    ['c1', '2026-11-15'],
-    ['c2', '2026-11-15'],
-    ['c3', '2026-11-15'],
-    ['c4', '2026-11-16'],
-    ['c5', '2026-11-16'],
-    // c6 not present → bookmark on non-dated list, excluded from totals.
-  ]);
-
-  it('returns empty when no bookmarks or items have dated source cards', () => {
-    expect(computeDiagnostic([], [], cardIdToDate)).toEqual([]);
-  });
-
-  it('Branch A scenario — bookmarks present, paired items zero everywhere', () => {
-    const rows = computeDiagnostic(
-      [
-        { source_card_id: 'c1' },
-        { source_card_id: 'c2' },
-        { source_card_id: 'c3' },
-        { source_card_id: 'c4' },
-      ],
-      [],
-      cardIdToDate,
-    );
-    const expected: DiagnosticRow[] = [
-      { date: '2026-11-15', bookmarks: 3, pairedItems: 0, gap: 3 },
-      { date: '2026-11-16', bookmarks: 1, pairedItems: 0, gap: 1 },
-    ];
-    expect(rows).toEqual(expected);
-  });
-
-  it('No-gap scenario — bookmarks and paired items align on every date', () => {
-    const rows = computeDiagnostic(
-      [
-        { source_card_id: 'c1' },
-        { source_card_id: 'c4' },
-      ],
-      [
-        { source_card_id: 'c1' },
-        { source_card_id: 'c4' },
-      ],
-      cardIdToDate,
-    );
-    for (const r of rows) expect(r.gap).toBe(0);
-  });
-
-  it('Partial-gap scenario — Branch B candidate when some dates have paired but UI shows zero', () => {
-    const rows = computeDiagnostic(
-      [
-        { source_card_id: 'c1' },
-        { source_card_id: 'c2' },
-        { source_card_id: 'c4' },
-      ],
-      [
-        { source_card_id: 'c4' }, // 11-16 paired; 11-15 unpaired
-      ],
-      cardIdToDate,
-    );
-    const day15 = rows.find((r) => r.date === '2026-11-15');
-    const day16 = rows.find((r) => r.date === '2026-11-16');
-    expect(day15).toEqual({
-      date: '2026-11-15',
-      bookmarks: 2,
-      pairedItems: 0,
-      gap: 2,
-    });
-    expect(day16).toEqual({
-      date: '2026-11-16',
-      bookmarks: 1,
-      pairedItems: 1,
-      gap: 0,
-    });
-  });
-
-  it('ignores bookmarks/items whose source_card_id is not on a dated list', () => {
-    const rows = computeDiagnostic(
-      [{ source_card_id: 'c6' }, { source_card_id: 'c1' }],
-      [{ source_card_id: 'c6' }],
-      cardIdToDate,
-    );
-    expect(rows).toEqual([
-      { date: '2026-11-15', bookmarks: 1, pairedItems: 0, gap: 1 },
-    ]);
-  });
-
-  it('deduplicates by source_card_id (no double-counting if duplicate rows)', () => {
-    const rows = computeDiagnostic(
-      [
-        { source_card_id: 'c1' },
-        { source_card_id: 'c1' }, // duplicate — counted once
-      ],
-      [
-        { source_card_id: 'c1' },
-        { source_card_id: 'c1' },
-      ],
-      cardIdToDate,
-    );
-    expect(rows).toEqual([
-      { date: '2026-11-15', bookmarks: 1, pairedItems: 1, gap: 0 },
-    ]);
-  });
-
-  it('rows are sorted ascending by date', () => {
-    const rows = computeDiagnostic(
-      [
-        { source_card_id: 'c4' },
-        { source_card_id: 'c1' },
-      ],
-      [],
-      cardIdToDate,
-    );
-    expect(rows.map((r) => r.date)).toEqual(['2026-11-15', '2026-11-16']);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// B-030 — Branch C safety net: the backfill planner reaches `new-item` for a
-// dated-list candidate that hasn't been paired yet. This codifies that the
-// loop's decision tree doesn't silently skip valid candidates — if a future
-// regression flips this, --backfill would produce zero inserts despite
-// candidates being present.
-// ---------------------------------------------------------------------------
-
-describe('runBackfill planner reaches new-item (B-030 Branch C regression net)', () => {
-  it('returns new-item for an unpaired bookmark on a dated list', () => {
-    const cardsById = new Map<string, TrelloCardLite>([
-      [
-        'card-A',
-        {
-          id: 'card-A',
-          name: 'Sensoji Temple',
-          desc: null,
-          idList: 'list-1115',
-          labels: [],
-          closed: false,
-        },
-      ],
-    ]);
-    const listDateById = new Map<string, string>([['list-1115', '2026-11-15']]);
-    const pairedCardIds = new Set<string>(); // none paired yet
-    const plan = planBackfillCard(
-      { source_card_id: 'card-A', place_id: null, category: 'sight' },
-      cardsById,
-      listDateById,
-      pairedCardIds,
-    );
-    expect(plan).toEqual({
-      action: 'new-item',
-      date: '2026-11-15',
-      itemType: 'activity',
-      placeId: null,
-    });
-  });
-
-  it('returns already-paired when the card is in the paired set', () => {
-    const cardsById = new Map<string, TrelloCardLite>([
-      [
-        'card-B',
-        { id: 'card-B', name: 'x', desc: null, idList: 'list-1', labels: [], closed: false },
-      ],
-    ]);
-    const listDateById = new Map<string, string>([['list-1', '2026-11-15']]);
-    const pairedCardIds = new Set<string>(['card-B']);
-    const plan = planBackfillCard(
-      { source_card_id: 'card-B', place_id: null, category: 'sight' },
-      cardsById,
-      listDateById,
-      pairedCardIds,
-    );
-    expect(plan).toEqual({ action: 'already-paired' });
   });
 });
