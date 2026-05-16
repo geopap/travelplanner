@@ -23,6 +23,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { secondaryButtonClass } from "@/components/ui/FormField";
 import { RemoveAccommodationDialog } from "./RemoveAccommodationDialog";
 import { AccommodationForm } from "./AccommodationForm";
+import { nameFor } from "@/lib/utils/accommodations";
 
 interface AccommodationsListProps {
   tripId: string;
@@ -302,8 +303,3 @@ export function AccommodationsList({
   );
 }
 
-export function nameFor(acc: AccommodationWithPlace): string {
-  if (acc.hotel_name && acc.hotel_name.trim().length > 0) return acc.hotel_name;
-  if (acc.place?.name && acc.place.name.trim().length > 0) return acc.place.name;
-  return "Accommodation";
-}
