@@ -16,6 +16,9 @@ import {
   inferTransportMode,
   hotelKind,
   pairHotels,
+  labelToItineraryType,
+  planBackfillCard,
+  categoryToItemType,
   type Summary,
 } from '../../scripts/import-trello';
 
@@ -57,6 +60,7 @@ function makeSummary(): Summary {
     bookmarks: 0,
     skipped: 0,
     errors: 0,
+    backfilled: 0,
     unpairedHotels: [],
     unlabeledCardIds: [],
   };
@@ -84,6 +88,7 @@ describe('parseArgs', () => {
     expect(parseArgs(['--user-email', 'me@example.com'])).toEqual({
       userEmail: 'me@example.com',
       dryRun: false,
+      backfill: false,
     });
   });
 
@@ -91,6 +96,7 @@ describe('parseArgs', () => {
     expect(parseArgs(['--user-email=me@example.com'])).toEqual({
       userEmail: 'me@example.com',
       dryRun: false,
+      backfill: false,
     });
   });
 
@@ -98,6 +104,23 @@ describe('parseArgs', () => {
     expect(parseArgs(['--user-email', 'a@b.co', '--dry-run'])).toEqual({
       userEmail: 'a@b.co',
       dryRun: true,
+      backfill: false,
+    });
+  });
+
+  it('--backfill flag toggles', () => {
+    expect(parseArgs(['--user-email', 'a@b.co', '--backfill'])).toEqual({
+      userEmail: 'a@b.co',
+      dryRun: false,
+      backfill: true,
+    });
+  });
+
+  it('--backfill + --dry-run combine', () => {
+    expect(parseArgs(['--user-email', 'a@b.co', '--backfill', '--dry-run'])).toEqual({
+      userEmail: 'a@b.co',
+      dryRun: true,
+      backfill: true,
     });
   });
 
@@ -107,6 +130,155 @@ describe('parseArgs', () => {
 
   it('throws when --user-email has no value', () => {
     expect(() => parseArgs(['--user-email'])).toThrow(/--user-email/);
+  });
+
+  // B-022 R5 — additional flag combinations.
+  it('throws when --backfill is set but --user-email is missing', () => {
+    expect(() => parseArgs(['--backfill'])).toThrow(/--user-email/);
+  });
+
+  it('--dry-run alone (regular import) still requires --user-email', () => {
+    expect(() => parseArgs(['--dry-run'])).toThrow(/--user-email/);
+    expect(parseArgs(['--dry-run', '--user-email', 'a@b.co'])).toEqual({
+      userEmail: 'a@b.co',
+      dryRun: true,
+      backfill: false,
+    });
+  });
+
+  it('--backfill + --dry-run order independence', () => {
+    expect(parseArgs(['--dry-run', '--backfill', '--user-email', 'a@b.co'])).toEqual({
+      userEmail: 'a@b.co',
+      dryRun: true,
+      backfill: true,
+    });
+    expect(parseArgs(['--backfill', '--user-email=a@b.co', '--dry-run'])).toEqual({
+      userEmail: 'a@b.co',
+      dryRun: true,
+      backfill: true,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. B-022 label → itinerary_items.type mapping.
+// ---------------------------------------------------------------------------
+
+describe('labelToItineraryType (B-022)', () => {
+  it('Restaurants → meal', () => {
+    expect(labelToItineraryType('Restaurants')).toBe('meal');
+  });
+
+  it('Attractions / Museums / Shopping → activity', () => {
+    expect(labelToItineraryType('Attractions')).toBe('activity');
+    expect(labelToItineraryType('Museums')).toBe('activity');
+    expect(labelToItineraryType('Shopping')).toBe('activity');
+  });
+
+  it('is case-insensitive', () => {
+    expect(labelToItineraryType('restaurants')).toBe('meal');
+    expect(labelToItineraryType('ATTRACTIONS')).toBe('activity');
+    expect(labelToItineraryType('  museums  ')).toBe('activity');
+  });
+
+  it('returns null for non-itinerary labels (Hotels, Transportation)', () => {
+    expect(labelToItineraryType('Hotels')).toBeNull();
+    expect(labelToItineraryType('Transportation')).toBeNull();
+  });
+
+  it('returns null for unknown labels and empty input', () => {
+    expect(labelToItineraryType('Random')).toBeNull();
+    expect(labelToItineraryType('')).toBeNull();
+  });
+
+  // B-022 R5 edge cases.
+  it('whitespace-only input returns null', () => {
+    expect(labelToItineraryType('   ')).toBeNull();
+  });
+
+  it('mixed-case spelling normalises', () => {
+    expect(labelToItineraryType('ResTauRants')).toBe('meal');
+    expect(labelToItineraryType('SHOPPING')).toBe('activity');
+    expect(labelToItineraryType('\tAttractions\n')).toBe('activity');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. B-022 backfill planner — pure decision tree.
+// ---------------------------------------------------------------------------
+
+describe('planBackfillCard (B-022)', () => {
+  const TRIP_DATED_LIST_ID = 'L-13nov';
+  const TRIP_DATE = '2026-11-13';
+
+  function makeCardsById(cards: TrelloCardLite[]): Map<string, TrelloCardLite> {
+    const m = new Map<string, TrelloCardLite>();
+    for (const c of cards) m.set(c.id, c);
+    return m;
+  }
+  function listMap(): Map<string, string> {
+    return new Map([[TRIP_DATED_LIST_ID, TRIP_DATE]]);
+  }
+
+  it('bookmark in paired-set → already-paired', () => {
+    const cand = { source_card_id: 'card-1', place_id: null, category: 'restaurant' as const };
+    const plan = planBackfillCard(cand, makeCardsById([]), listMap(), new Set(['card-1']));
+    expect(plan).toEqual({ action: 'already-paired' });
+  });
+
+  it('bookmark not in paired-set + card not in export → no-dated-list', () => {
+    const cand = { source_card_id: 'missing', place_id: null, category: 'sight' as const };
+    const plan = planBackfillCard(cand, makeCardsById([]), listMap(), new Set());
+    expect(plan).toEqual({ action: 'no-dated-list' });
+  });
+
+  it('bookmark not in paired-set + card on non-dated list → no-dated-list', () => {
+    const card = makeCard({ id: 'card-2', name: 'Sushi', idList: 'L-toplan' });
+    const cand = { source_card_id: 'card-2', place_id: null, category: 'restaurant' as const };
+    const plan = planBackfillCard(cand, makeCardsById([card]), listMap(), new Set());
+    expect(plan).toEqual({ action: 'no-dated-list' });
+  });
+
+  it('bookmark not in paired-set + card on dated, in-range list → new-item (restaurant → meal)', () => {
+    const card = makeCard({ id: 'card-3', name: 'Lunch', idList: TRIP_DATED_LIST_ID });
+    const cand = {
+      source_card_id: 'card-3',
+      place_id: 'place-abc',
+      category: 'restaurant' as const,
+    };
+    const plan = planBackfillCard(cand, makeCardsById([card]), listMap(), new Set());
+    expect(plan).toEqual({
+      action: 'new-item',
+      date: TRIP_DATE,
+      itemType: 'meal',
+      placeId: 'place-abc',
+    });
+  });
+
+  it('new-item routes sight/museum/shopping to activity', () => {
+    const card = makeCard({ id: 'card-4', name: 'Temple', idList: TRIP_DATED_LIST_ID });
+    const cardsById = makeCardsById([card]);
+    const lm = listMap();
+    const paired = new Set<string>();
+    for (const cat of ['sight', 'museum', 'shopping'] as const) {
+      const cand = { source_card_id: 'card-4', place_id: null, category: cat };
+      const plan = planBackfillCard(cand, cardsById, lm, paired);
+      expect(plan).toEqual({
+        action: 'new-item',
+        date: TRIP_DATE,
+        itemType: 'activity',
+        placeId: null,
+      });
+    }
+  });
+});
+
+describe('categoryToItemType (B-022)', () => {
+  it('maps each BookmarkCategory to the correct itinerary type', () => {
+    expect(categoryToItemType('restaurant')).toBe('meal');
+    expect(categoryToItemType('sight')).toBe('activity');
+    expect(categoryToItemType('museum')).toBe('activity');
+    expect(categoryToItemType('shopping')).toBe('activity');
   });
 });
 

@@ -85,6 +85,7 @@ type BookmarkCategory = 'restaurant' | 'sight' | 'museum' | 'shopping';
 interface CliArgs {
   userEmail: string;
   dryRun: boolean;
+  backfill: boolean;
 }
 
 export interface Summary {
@@ -96,6 +97,7 @@ export interface Summary {
   bookmarks: number;
   skipped: number;
   errors: number;
+  backfilled: number;
   unpairedHotels: string[];
   unlabeledCardIds: string[];
 }
@@ -107,6 +109,7 @@ export interface Summary {
 export function parseArgs(argv: readonly string[]): CliArgs {
   let userEmail: string | null = null;
   let dryRun = false;
+  let backfill = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--user-email') {
@@ -118,12 +121,14 @@ export function parseArgs(argv: readonly string[]): CliArgs {
       userEmail = a.slice('--user-email='.length);
     } else if (a === '--dry-run') {
       dryRun = true;
+    } else if (a === '--backfill') {
+      backfill = true;
     }
   }
   if (!userEmail) {
     throw new Error('Missing required --user-email <email>');
   }
-  return { userEmail, dryRun };
+  return { userEmail, dryRun, backfill };
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +227,22 @@ export function classify(card: TrelloCard): LabelKind {
     case 'shopping': return 'shopping';
     default: return 'unlabeled';
   }
+}
+
+// B-022: map a Trello label (or canonical LabelKind string) to the paired
+// itinerary_items.type. Returns null when the label is not one of the four
+// labels that promote to a day item — caller skips cleanly.
+//
+// Case-insensitive; trims; accepts either the Trello label name as it appears
+// in the export (`Restaurants`, `Attractions`, `Museums`, `Shopping`) or the
+// canonical LabelKind string (`restaurants`, ...). Hotels and Transportation
+// are intentionally excluded: hotels become `accommodations` rows and
+// transportation becomes `transport` items via their dedicated paths.
+export function labelToItineraryType(label: string): 'meal' | 'activity' | null {
+  const k = label.trim().toLowerCase();
+  if (k === 'restaurants') return 'meal';
+  if (k === 'attractions' || k === 'museums' || k === 'shopping') return 'activity';
+  return null;
 }
 
 // Order matters: explicit modes (bus/train/ferry/car) are evaluated BEFORE
@@ -341,7 +362,11 @@ async function bootstrapTrip(
 
   let tripId: string;
   if (existing) {
-    tripId = existing.id as string;
+    const existingId: unknown = existing.id;
+    if (typeof existingId !== 'string') {
+      throw new Error(`select trips: expected string id, got ${typeof existingId}`);
+    }
+    tripId = existingId;
     logInfo('trip exists, reusing', { tripId });
   } else {
     const { data: inserted, error: insErr } = await client
@@ -356,7 +381,11 @@ async function bootstrapTrip(
       .select('id')
       .single();
     if (insErr || !inserted) throw new Error(`insert trips: ${insErr?.message ?? 'no row'}`);
-    tripId = inserted.id as string;
+    const insertedId: unknown = inserted.id;
+    if (typeof insertedId !== 'string') {
+      throw new Error(`insert trips: expected string id, got ${typeof insertedId}`);
+    }
+    tripId = insertedId;
     logInfo('trip created', { tripId });
   }
 
@@ -475,7 +504,11 @@ async function processTransportation(
   if (itemErr || !itemBack) throw new Error(`itinerary_items: ${itemErr?.message ?? 'no row'}`);
   ctx.summary.items++;
 
-  const itemId = itemBack.id as string;
+  const itemBackId: unknown = itemBack.id;
+  if (typeof itemBackId !== 'string') {
+    throw new Error(`itinerary_items: expected string id, got ${typeof itemBackId}`);
+  }
+  const itemId: string = itemBackId;
   const mode = inferTransportMode(card.name);
 
   // transportation has unique(itinerary_item_id) — that's the natural key for
@@ -521,6 +554,67 @@ async function processBookmark(
     .upsert(row, { onConflict: 'trip_id,source_card_id' });
   if (error) throw new Error(error.message);
   ctx.summary.bookmarks++;
+}
+
+// B-022: write the paired `itinerary_items` row for a labeled bookmark card.
+// Upsert keyed on (trip_id, source_card_id) so re-runs overwrite title/notes/
+// place_id/type/day_id — letting a Trello rename, an enriched bookmark
+// place_id, or a moved card flow into the existing row.
+async function processLabeledItem(
+  ctx: ProcessCtx,
+  card: TrelloCard,
+  dayId: string,
+  itemType: 'meal' | 'activity',
+  placeId: string | null,
+): Promise<void> {
+  const row = {
+    trip_id: ctx.tripId,
+    day_id: dayId,
+    type: itemType,
+    title: card.name.slice(0, 200),
+    notes: truncate(card.desc, 4000),
+    place_id: placeId,
+    created_by: ctx.ownerId,
+    source_card_id: card.id,
+  };
+  if (ctx.dryRun) {
+    logPlan('would upsert itinerary_items (labeled)', {
+      cardId: card.id,
+      type: itemType,
+      placeId,
+    });
+    ctx.summary.items++;
+    return;
+  }
+  const { error } = await ctx.client
+    .from('itinerary_items')
+    .upsert(row, { onConflict: 'trip_id,source_card_id' });
+  if (error) throw new Error(`itinerary_items (labeled): ${error.message}`);
+  ctx.summary.items++;
+}
+
+// B-022: pre-upsert SELECT to read the just-or-already-upserted bookmark's
+// place_id so the paired item carries the same FK. Returns null on first run
+// (place_id is enriched later by B-023).
+//
+// Perf bound (R2-approved, AC 10): called once per dated bookmark card. For the
+// japan-2026 seed this is ≤ ~60 cards → ≤ ~60 single-row indexed SELECTs by
+// (trip_id, source_card_id), well within the 30s wall-clock import ceiling.
+// Not an N+1 in the API hot-path sense; this is a one-shot import script.
+async function lookupBookmarkPlaceId(
+  ctx: ProcessCtx,
+  card: TrelloCard,
+): Promise<string | null> {
+  if (ctx.dryRun) return null;
+  const { data, error } = await ctx.client
+    .from('bookmarks')
+    .select('place_id')
+    .eq('trip_id', ctx.tripId)
+    .eq('source_card_id', card.id)
+    .maybeSingle();
+  if (error) throw new Error(`bookmarks lookup: ${error.message}`);
+  const pid = data?.place_id;
+  return typeof pid === 'string' ? pid : null;
 }
 
 interface HotelPair {
@@ -647,6 +741,197 @@ async function processHotelPair(ctx: ProcessCtx, pair: HotelPair): Promise<void>
 }
 
 // ---------------------------------------------------------------------------
+// B-022: backfill — populate paired itinerary_items for bookmarks that
+// pre-date the labeled-import feature.
+// ---------------------------------------------------------------------------
+
+interface BookmarkRow {
+  source_card_id: string;
+  place_id: string | null;
+  category: BookmarkCategory;
+}
+
+export function categoryToItemType(cat: BookmarkCategory): 'meal' | 'activity' | null {
+  if (cat === 'restaurant') return 'meal';
+  if (cat === 'sight' || cat === 'museum' || cat === 'shopping') return 'activity';
+  return null;
+}
+
+// B-022 R5: pure planner for the backfill decision per candidate. Extracted so
+// dry-run plan-output is unit-testable without a live Supabase client. Mirrors
+// the runtime decision tree in `runBackfill`; that function delegates to this
+// helper so behavior cannot drift.
+export type BackfillPlan =
+  | { action: 'new-item'; date: string; itemType: 'meal' | 'activity'; placeId: string | null }
+  | { action: 'already-paired' }
+  | { action: 'no-dated-list' }
+  | { action: 'skip-category' };
+
+export function planBackfillCard(
+  cand: BookmarkRow,
+  cardsById: ReadonlyMap<string, TrelloCard>,
+  listDateById: ReadonlyMap<string, string>,
+  pairedCardIds: ReadonlySet<string>,
+): BackfillPlan {
+  if (pairedCardIds.has(cand.source_card_id)) return { action: 'already-paired' };
+  const card = cardsById.get(cand.source_card_id);
+  if (!card) return { action: 'no-dated-list' };
+  const date = listDateById.get(card.idList);
+  if (!date) return { action: 'no-dated-list' };
+  const itemType = categoryToItemType(cand.category);
+  if (itemType === null) return { action: 'skip-category' };
+  return { action: 'new-item', date, itemType, placeId: cand.place_id };
+}
+
+async function runBackfill(
+  ctx: ProcessCtx,
+  exportData: TrelloExport,
+  listDateById: Map<string, string>,
+): Promise<void> {
+  // Index cards by id for the per-card date lookup.
+  const cardsById = new Map<string, TrelloCard>();
+  for (const c of exportData.cards) cardsById.set(c.id, c);
+
+  // Step 3: pull all bookmarks with a source_card_id for this trip.
+  // Bounded by domain (~60 rows lifetime); no pagination needed.
+  const { data: candidatesRaw, error: bmErr } = await ctx.client
+    .from('bookmarks')
+    .select('source_card_id, place_id, category')
+    .eq('trip_id', ctx.tripId)
+    .not('source_card_id', 'is', null);
+  if (bmErr) throw new Error(`backfill: select bookmarks: ${bmErr.message}`);
+
+  const candidates: BookmarkRow[] = [];
+  for (const row of candidatesRaw ?? []) {
+    const sid = row.source_card_id;
+    const pid = row.place_id;
+    const cat = row.category;
+    if (typeof sid !== 'string') continue;
+    if (cat !== 'restaurant' && cat !== 'sight' && cat !== 'museum' && cat !== 'shopping') continue;
+    candidates.push({
+      source_card_id: sid,
+      place_id: typeof pid === 'string' ? pid : null,
+      category: cat,
+    });
+  }
+  logInfo('backfill candidates loaded', { count: candidates.length });
+
+  // Step 4: pull all itinerary_items source_card_ids for this trip into a Set
+  // (batched paired-check — one round trip).
+  const { data: pairedRaw, error: pErr } = await ctx.client
+    .from('itinerary_items')
+    .select('source_card_id')
+    .eq('trip_id', ctx.tripId)
+    .not('source_card_id', 'is', null);
+  if (pErr) throw new Error(`backfill: select itinerary_items: ${pErr.message}`);
+
+  const pairedCardIds = new Set<string>();
+  for (const row of pairedRaw ?? []) {
+    const sid = row.source_card_id;
+    if (typeof sid === 'string') pairedCardIds.add(sid);
+  }
+  logInfo('backfill paired set loaded', { count: pairedCardIds.size });
+
+  // Step 5: per-candidate decision and insert (or plan).
+  for (const cand of candidates) {
+    try {
+      const plan = planBackfillCard(cand, cardsById, listDateById, pairedCardIds);
+
+      if (plan.action === 'already-paired') {
+        if (ctx.dryRun) {
+          logPlan(`backfill card ${cand.source_card_id} → already-paired (skip)`);
+        }
+        ctx.summary.skipped++;
+        continue;
+      }
+
+      if (plan.action === 'no-dated-list') {
+        const card = cardsById.get(cand.source_card_id);
+        if (ctx.dryRun) {
+          logPlan(`backfill card ${cand.source_card_id} → no-dated-list (skip)`);
+        } else if (!card) {
+          logWarn('backfill: card not in export', { sourceCardId: cand.source_card_id });
+        } else {
+          logWarn('backfill: card list not dated/in-range', {
+            sourceCardId: cand.source_card_id,
+            idList: card.idList,
+          });
+        }
+        ctx.summary.skipped++;
+        continue;
+      }
+
+      if (plan.action === 'skip-category') {
+        // Category not in the labeled-item set (e.g. future categories).
+        ctx.summary.skipped++;
+        continue;
+      }
+
+      // plan.action === 'new-item' from here on.
+      const { date, itemType } = plan;
+      const card = cardsById.get(cand.source_card_id);
+      // Narrowed by planner: 'new-item' implies card exists.
+      if (!card) {
+        logError('backfill: planner inconsistency', { sourceCardId: cand.source_card_id });
+        ctx.summary.errors++;
+        continue;
+      }
+
+      const dayId = ctx.daysByDate.get(date);
+      if (!dayId) {
+        logError('backfill: day_not_found', { sourceCardId: cand.source_card_id, date });
+        ctx.summary.errors++;
+        continue;
+      }
+
+      if (ctx.dryRun) {
+        logPlan(`backfill card ${cand.source_card_id} → new-item (date: ${date})`, {
+          type: itemType,
+          placeId: cand.place_id,
+        });
+        ctx.summary.backfilled++;
+        continue;
+      }
+
+      // Live: INSERT (not upsert) — backfill must not overwrite. Catch the
+      // unique-violation from a concurrent regular-import run as a skip.
+      const row = {
+        trip_id: ctx.tripId,
+        day_id: dayId,
+        type: itemType,
+        title: card.name.slice(0, 200),
+        notes: truncate(card.desc, 4000),
+        place_id: cand.place_id,
+        created_by: ctx.ownerId,
+        source_card_id: cand.source_card_id,
+      };
+      const { error: insErr } = await ctx.client.from('itinerary_items').insert(row);
+      if (insErr) {
+        // Postgres unique_violation = 23505. Supabase-js exposes the SQLSTATE
+        // in `error.code` for PostgREST errors.
+        const code = insErr.code;
+        if (code === '23505') {
+          logWarn('backfill: race — row appeared mid-run, treating as skip', {
+            sourceCardId: cand.source_card_id,
+          });
+          ctx.summary.skipped++;
+          continue;
+        }
+        throw new Error(`itinerary_items insert: ${insErr.message}`);
+      }
+      ctx.summary.backfilled++;
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      logError('backfill_card_skipped', {
+        sourceCardId: cand.source_card_id,
+        reason,
+      });
+      ctx.summary.errors++;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main.
 // ---------------------------------------------------------------------------
 
@@ -703,6 +988,7 @@ async function main(): Promise<void> {
     bookmarks: 0,
     skipped: 0,
     errors: 0,
+    backfilled: 0,
     unpairedHotels: [],
     unlabeledCardIds: [],
   };
@@ -715,6 +1001,24 @@ async function main(): Promise<void> {
     dryRun: args.dryRun,
     summary,
   };
+
+  // B-022: --backfill short-circuits the regular Trello-walking import.
+  // It walks existing bookmarks for this trip with a non-null source_card_id
+  // and inserts the missing paired itinerary_items in place.
+  if (args.backfill) {
+    await runBackfill(ctx, exportData, listDateById);
+    logInfo('summary', {
+      trips: summary.trips,
+      days: summary.days,
+      items: summary.items,
+      backfilled: summary.backfilled,
+      skipped: summary.skipped,
+      errors: summary.errors,
+      dryRun: args.dryRun,
+      mode: 'backfill',
+    });
+    return;
+  }
 
   // Pre-collect hotel cards for pairing across the whole trip.
   const hotelEntries: Array<{ card: TrelloCard; date: string }> = [];
@@ -750,10 +1054,29 @@ async function main(): Promise<void> {
         await processTransportation(ctx, card, dayId);
         continue;
       }
-      if (kind === 'restaurants') { await processBookmark(ctx, card, 'restaurant'); continue; }
-      if (kind === 'museums')     { await processBookmark(ctx, card, 'museum');     continue; }
-      if (kind === 'attractions') { await processBookmark(ctx, card, 'sight');      continue; }
-      if (kind === 'shopping')    { await processBookmark(ctx, card, 'shopping');   continue; }
+      // B-022: labeled bookmark cards on dated lists ALSO create a paired
+      // itinerary_items row. Bookmark upsert first (so place_id can be read
+      // from it for the paired item, including any prior enrichment), then
+      // the paired item via processLabeledItem.
+      if (kind === 'restaurants' || kind === 'museums' || kind === 'attractions' || kind === 'shopping') {
+        const category: BookmarkCategory =
+          kind === 'restaurants' ? 'restaurant'
+          : kind === 'museums' ? 'museum'
+          : kind === 'attractions' ? 'sight'
+          : 'shopping';
+        await processBookmark(ctx, card, category);
+        // Inline mapping: at this call site `kind` is statically narrowed to the
+        // four bookmarkable LabelKinds, all of which map to a non-null itinerary
+        // type. We avoid `labelToItineraryType` (which returns `… | null`) here
+        // so the type system sees a definite 'meal' | 'activity'. The helper
+        // remains for callers that take arbitrary label strings.
+        const itemType = (
+          kind === 'restaurants' ? 'meal' : 'activity'
+        ) satisfies 'meal' | 'activity';
+        const placeId = await lookupBookmarkPlaceId(ctx, card);
+        await processLabeledItem(ctx, card, dayId, itemType, placeId);
+        continue;
+      }
       // Unlabeled → itinerary note.
       summary.unlabeledCardIds.push(card.id);
       await processItineraryNote(ctx, card, dayId);
@@ -789,6 +1112,7 @@ async function main(): Promise<void> {
     bookmarks: summary.bookmarks,
     skipped: summary.skipped,
     errors: summary.errors,
+    backfilled: summary.backfilled,
     unpairedHotels: summary.unpairedHotels.length,
     unlabeledCards: summary.unlabeledCardIds.length,
     dryRun: args.dryRun,
