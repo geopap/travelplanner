@@ -319,6 +319,8 @@ describe('ExpenseRowSchema + mapExpenseRow', () => {
     created_by: U1,
     created_at: '2026-04-01T00:00:00Z',
     updated_at: '2026-04-01T00:00:00Z',
+    source_kind: null,
+    source_id: null,
     paid_by_profile: {
       id: U1,
       full_name: 'Alice',

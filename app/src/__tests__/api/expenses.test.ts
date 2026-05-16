@@ -141,6 +141,8 @@ function defaultExpenseRow(over: Record<string, unknown> = {}) {
     created_by: FIXED_USER_ID,
     created_at: '2026-04-01T00:00:00Z',
     updated_at: '2026-04-01T00:00:00Z',
+    source_kind: null,
+    source_id: null,
     paid_by_profile: {
       id: FIXED_USER_ID,
       full_name: 'Alice',
