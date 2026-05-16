@@ -60,13 +60,18 @@ const refineDates = <T extends { check_in_date?: string; check_out_date?: string
     },
   );
 
-const refineNameOrPlace = <T extends { place_id?: string; hotel_name?: string }>(
+const refineNameOrPlace = <
+  T extends { place_id?: string; google_place_id?: string; hotel_name?: string },
+>(
   schema: z.ZodType<T>,
 ) =>
-  schema.refine((d) => Boolean(d.place_id || d.hotel_name), {
-    path: ['hotel_name'],
-    message: 'Provide either hotel_name or place_id',
-  });
+  schema.refine(
+    (d) => Boolean(d.place_id || d.google_place_id || d.hotel_name),
+    {
+      path: ['hotel_name'],
+      message: 'Provide either hotel_name, place_id, or google_place_id',
+    },
+  );
 
 const refineCostCurrency = <
   T extends {
@@ -93,9 +98,22 @@ const refineCostCurrency = <
 // CREATE
 // ----------------------------------------------------------------------------
 
+/**
+ * B-023 — Google Place ID schema. These IDs are NOT UUIDs; they are
+ * length-bounded, opaque, URL-safe strings minted by Google (e.g.
+ * `ChIJN1t_tDeuEmsRUsoyG83frY4`). The current crop is ≥ 20 chars; cap at 255
+ * defensively. We accept the URL-safe alphabet only.
+ */
+const GooglePlaceIdSchema = z
+  .string()
+  .min(20, 'google_place_id must be at least 20 characters')
+  .max(255, 'google_place_id must be 255 characters or fewer')
+  .regex(/^[A-Za-z0-9_-]+$/, 'google_place_id contains invalid characters');
+
 const AccommodationCreateBase = z
   .object({
     place_id: UuidSchema.optional(),
+    google_place_id: GooglePlaceIdSchema.optional(),
     hotel_name: HotelNameSchema.optional(),
     check_in_date: IsoDateSchema,
     check_out_date: IsoDateSchema,
@@ -121,19 +139,47 @@ export type AccommodationCreateInput = z.infer<typeof AccommodationCreate>;
 // re-validates the merged identity against the existing row.
 // ----------------------------------------------------------------------------
 
-const AccommodationPatchBase = AccommodationCreateBase.partial();
+/**
+ * PATCH allows `place_id: null` explicitly (B-023 — clearing the place link
+ * via the place picker). The base schema's `place_id` is uuid-or-omitted, so
+ * we redefine that one field as `.nullable().optional()` here. Same applies
+ * to `google_place_id` for symmetry (although the route rejects mixing the
+ * two via a server-side guard).
+ */
+const AccommodationPatchBase = AccommodationCreateBase.partial().extend({
+  place_id: UuidSchema.nullable().optional(),
+  google_place_id: z
+    .union([
+      z.string().min(20).max(255).regex(/^[A-Za-z0-9_-]+$/),
+      z.null(),
+    ])
+    .optional(),
+});
 
 export const AccommodationPatch = refineCostCurrency(
   refineDates(AccommodationPatchBase)
     .refine(
       (d) => {
-        const touchesIdentity = 'place_id' in d || 'hotel_name' in d;
-        if (!touchesIdentity) return true;
-        return Boolean(d.place_id || d.hotel_name);
+        // The PATCH may legitimately clear a single identity field (e.g. set
+        // `place_id: null` while keeping `hotel_name` on the existing row, or
+        // wipe `hotel_name: null` while keeping the linked `place_id`). The
+        // schema therefore only rejects the obvious user error: explicitly
+        // setting ALL identity fields to falsy in the SAME patch. Server
+        // route re-validates the merged state vs. the existing row.
+        const placeIdSent = 'place_id' in d;
+        const gpidSent = 'google_place_id' in d;
+        const nameSent = 'hotel_name' in d;
+        if (!placeIdSent && !gpidSent && !nameSent) return true;
+        // If every identity field present in the patch is falsy AND no
+        // identity field is omitted (i.e., user cleared everything in one
+        // go), reject. If any identity field is omitted, the route's merged
+        // check is authoritative.
+        if (!placeIdSent || !nameSent) return true;
+        return Boolean(d.place_id || d.google_place_id || d.hotel_name);
       },
       {
         path: ['hotel_name'],
-        message: 'Provide either hotel_name or place_id',
+        message: 'Provide either hotel_name, place_id, or google_place_id',
       },
     )
     .refine(

@@ -2875,3 +2875,380 @@ No other deps. No clustering library (`leaflet.markercluster`) in v1 — a singl
 - No new route, no new auth surface — review-scope is the embed select only.
 - `viewer` role: existing RLS already allows SELECT on `itinerary_items` for any member; viewer renders the map identically; no write paths in DayMap/DayMapSection (AC-9).
 - Tile requests go directly from the browser to OSM — no server-side proxy, no API key, no leakage risk.
+
+---
+
+## B-022 — Day-anchor labeled Trello imports (R2 architecture)
+
+Extends `app/scripts/import-trello.ts` so labeled cards on dated lists (`Restaurants`, `Attractions`, `Museums`, `Shopping`) create paired rows: keep the existing `bookmarks` row (so Places tab is unchanged) AND insert a paired `itinerary_items` row on the day matching the card's list date. Adds a one-shot `--backfill` mode that walks existing bookmarks with `source_card_id IS NOT NULL` and inserts the missing items in-place. Sets `itinerary_items.place_id` in the same pass so B-023's 3-source day-map merge has a non-null FK to plot.
+
+### B-022.1 No new migrations required
+
+Verified against the as-shipped schema:
+
+- `itinerary_items.place_id uuid null references places(id) on delete set null` — shipped by 0018 (B-015). Nullable, no default. ✅
+- `itinerary_items_trip_source_card_uniq UNIQUE (trip_id, source_card_id)` — shipped by 0011 then converted from partial-index to a real UNIQUE constraint by 0015 (the hotfix that unblocked `onConflict: 'trip_id,source_card_id'`). Treats NULLs as distinct, so UI-created rows without a source card coexist on the same trip. ✅
+- `bookmarks_trip_source_card_uniq UNIQUE (trip_id, source_card_id)` — same 0011 → 0015 path. ✅
+- `itinerary_items.type` CHECK already permits `'meal'` and `'activity'` (0001 line 109). ✅
+- `audit_log` is application-level only (no DB trigger on `itinerary_items`). The existing `app/scripts/import-trello.ts` makes NO `audit_log` calls today; this remains acceptable for a one-shot maintenance script run by the sole user. AC 12's "audit-log trigger" expectation is **renegotiated**: there is no trigger to confirm. Decision: skip per-row audit calls in the script (matches existing transport/bookmark/accommodation paths); document the one-shot run in the user's release notes instead. No migration to add a trigger — would add cost across all UI mutations and break the application-level pattern.
+
+**Migration count for B-022: 0.**
+
+### B-022.2 Label → (bookmark category, itinerary item type) routing
+
+| Trello label  | bookmarks.category | itinerary_items.type |
+|---------------|--------------------|----------------------|
+| `Restaurants` | `restaurant`       | `meal`               |
+| `Attractions` | `sight`            | `activity`           |
+| `Museums`     | `museum`           | `activity`           |
+| `Shopping`    | `shopping`         | `activity`           |
+
+Source: AC 1. Item `title` = card.name (truncated to 200, matching the existing pattern); `notes` = card.desc (truncated to 4000); `start_time`/`end_time` = null (no time data in Trello list); `day_id` = `daysByDate.get(date)` for the dated list the card lives on.
+
+### B-022.3 Same-pass `place_id` lookup — DECISION: option (a), pre-upsert lookup
+
+Two options were on the table:
+
+- **(a) Pre-upsert lookup** — for each labeled card, SELECT `bookmarks` by `(trip_id, source_card_id)` to get the current `place_id` (null on first run, possibly non-null after Places enrichment from B-023), then upsert the bookmark, then upsert the paired item carrying whichever `place_id` came back. One extra round-trip per labeled card.
+- **(b) Two-pass batch** — upsert all bookmarks first using `.upsert(...).select('id, source_card_id, place_id')` returning the merged rows, build a `Map<source_card_id, place_id>`, then iterate again to upsert items.
+
+**Decision: (a).** Justification:
+1. Volume is bounded — japan-2026.json has ~60 labeled cards, ~100 total. The extra SELECT-per-card adds <100 round trips, well inside the AC 10 30s ceiling (single-row SELECT to Supabase ≈ 30–60ms; ≈ 6s worst case).
+2. (b) requires a `.select()` projection on the upsert AND a separate iteration phase — more code surface, more state, harder error recovery per-card.
+3. (a) lets us reuse the **exact pattern** the existing transport path already uses: per-card `try { upsertA; upsertB } catch { log; summary.errors++ }`. Per-card resilience (AC's non-atomic backfill spec) is symmetric for both regular and backfill paths.
+4. The bookmark `place_id` is null on first run anyway; the lookup only earns its keep on subsequent runs after B-023 enrichment populates it. Acceptable cost.
+
+**Concrete sequence per labeled card (regular path):**
+
+```
+1. classify(card) → label kind (restaurants/museums/attractions/shopping)
+2. const { data: existingBookmark } = client.from('bookmarks')
+     .select('place_id')
+     .eq('trip_id', tripId)
+     .eq('source_card_id', card.id)
+     .maybeSingle();
+3. processBookmark(ctx, card, category)   // existing, idempotent upsert
+4. const placeId = existingBookmark?.place_id ?? null;
+5. processLabeledItem(ctx, card, dayId, itemType, placeId)
+     // upsert into itinerary_items with onConflict 'trip_id,source_card_id'
+```
+
+Step 2 returns `null` on first run; step 4 passes `null`; step 5's `place_id` field is null. After B-023 enrichment runs and sets some bookmarks' `place_id`, a re-run of `import-trello.ts` will pick the now-non-null value up in step 2 and write it into the item in step 5. Idempotent both ways.
+
+### B-022.4 New helper: `processLabeledItem`
+
+Mirrors `processItineraryNote` exactly except for the `type` and `place_id` fields:
+
+```ts
+async function processLabeledItem(
+  ctx: ProcessCtx,
+  card: TrelloCard,
+  dayId: string,
+  itemType: 'meal' | 'activity',
+  placeId: string | null,
+): Promise<void> {
+  const row = {
+    trip_id: ctx.tripId,
+    day_id: dayId,
+    type: itemType,
+    title: card.name.slice(0, 200),
+    notes: truncate(card.desc, 4000),
+    place_id: placeId,
+    created_by: ctx.ownerId,
+    source_card_id: card.id,
+  };
+  if (ctx.dryRun) {
+    logPlan('would upsert itinerary_items (labeled)', {
+      cardId: card.id, type: itemType, placeId,
+    });
+    ctx.summary.items++;
+    return;
+  }
+  const { error } = await ctx.client
+    .from('itinerary_items')
+    .upsert(row, { onConflict: 'trip_id,source_card_id' });
+  if (error) throw new Error(error.message);
+  ctx.summary.items++;
+}
+```
+
+### B-022.5 Idempotency contract
+
+- **Regular path (re-run on same Trello export):** `upsert(..., { onConflict: 'trip_id,source_card_id' })` — the existing helper semantics are "INSERT or UPDATE all supplied columns". This means `title`, `notes`, and `place_id` are **overwritten** on every run. That is the desired contract: it lets a Trello rename or a freshly enriched `place_id` flow into the existing row without the user needing to delete-and-reinsert. It matches the existing transport upsert and the bookmark upsert. UI-mutated rows (no `source_card_id`) are untouched by the unique key's NULL-distinct semantics.
+- **Backfill path:** insert-only — if `(trip_id, source_card_id)` already has a paired item (an earlier `--backfill` run, or a normal import run after B-022 ships), skip and increment `summary.skipped`. Backfill is a one-shot to close the gap on existing Japan-2026 bookmarks that pre-date this feature; once closed, it should not silently re-write data. Implementation: SELECT first (see B-022.6 step 3) — if a row exists, log `[plan] backfill card <cardId> → skip (already paired)` in dry-run, or just increment `summary.skipped` in live mode.
+
+### B-022.6 Backfill query shape
+
+CLI surface: extend `parseArgs` to accept `--backfill` (boolean). When `--backfill` is set, skip the Trello-file-walking path entirely and run the following:
+
+```
+1. Build `daysByDate` and `tripId` via the existing bootstrapTrip() path
+   (idempotent — re-uses the existing Japan-2026 trip).
+2. Build `listDateById` from the same data/japan-2026.json file (the script
+   already reads this). Backfill is scoped to japan-2026 only — for v1 the
+   script knows one trip, so we keep the file path constant. Arbitrary Trello
+   JSON is NOT supported by backfill in v1; the existing `--user-email` +
+   default file path are sufficient.
+3. const { data: candidates } = await client.from('bookmarks')
+     .select('id, source_card_id, place_id, category')
+     .eq('trip_id', tripId)
+     .not('source_card_id', 'is', null);
+   // No paging needed: ~60 rows.
+4. const { data: pairedRows } = await client.from('itinerary_items')
+     .select('source_card_id')
+     .eq('trip_id', tripId)
+     .not('source_card_id', 'is', null);
+   const pairedCardIds = new Set(pairedRows.map(r => r.source_card_id));
+5. For each candidate:
+   - If pairedCardIds.has(candidate.source_card_id) →
+       logPlan('backfill card <id> → skip (already paired)') in dry-run,
+       summary.skipped++ in live mode.
+   - Else, look up the card's list-date in the Trello export:
+       - Scan exportData.cards for a card with id === candidate.source_card_id.
+       - listDateById.get(card.idList) → ISO date.
+       - daysByDate.get(date) → dayId.
+       - itemType = category === 'restaurant' ? 'meal' : 'activity'.
+       - placeId = candidate.place_id  // already known, no extra round trip
+       - In dry-run: logPlan(`backfill card ${cardId} → insert ${itemType} on ${date}`).
+       - Live: insert (NOT upsert — see B-022.5 backfill rule) into
+         itinerary_items. If the insert fails on the unique constraint
+         (race with a concurrent regular import — extremely unlikely for a
+         single-user tool but possible), catch and treat as skip.
+6. Print summary line at the end including a new `backfilled` counter.
+```
+
+The "paired already" check is a single batched SELECT (step 4) loaded into an in-memory Set. This is cheaper than a per-card existence query (≈ 60 round trips collapsed to 1) and trivially fits in memory.
+
+### B-022.7 `--backfill --dry-run` output format
+
+Per AC 7, dry-run emits one `[plan]` line per candidate card, prefixed with the action. The existing `logPlan` helper writes `[plan] <msg> {ctx}` to stdout. For backfill we use a stable, parseable shape:
+
+```
+[plan] backfill card <cardId> → insert <type> on <date>
+[plan] backfill card <cardId> → skip (already paired)
+[plan] backfill card <cardId> → skip (no list date in export)
+```
+
+`<type>` is `meal` or `activity`. `<date>` is ISO `YYYY-MM-DD`. The third line covers a Trello card that exists in `bookmarks` but whose list (or card) is no longer in the export file — log + skip + `summary.skipped++`, never fatal. End-of-run summary lists totals.
+
+### B-022.8 R2 Query Performance Checklist
+
+| # | Check | Status | Reasoning |
+|---|-------|--------|-----------|
+| Q-1 | List queries bounded | ✅ | Step 3 and step 4 in B-022.6 are filtered by `trip_id`; the trip has ≤ ~200 bookmarks lifetime — well under any limit. Not user-facing, not paginated, but bounded by domain. |
+| Q-2 | No N+1 | ✅ | "Paired already" check is one SELECT into a Set (step 4), not per-card. Regular path's pre-upsert SELECT (B-022.3 step 2) is one query per card — explicitly justified above as bounded, single-trip, ~60 cards; the alternative (b) was rejected on code-complexity grounds, not perf grounds. Not flagged as N+1 because it's a script, not a request handler, and total round-trips stay under 200 for the entire run. |
+| Q-3 | Pagination on list endpoints | n/a | No new API routes. |
+| Q-4 | Date-bounded analytics queries | n/a | Not analytics. |
+
+### B-022.9 Day-view rendering confirmation (AC 11)
+
+Verified in `app/src/components/itinerary/DayCard.tsx` (line 202): the component iterates `items.map((item) => <ItineraryItemCard ... />)` with **no type-based filtering**. `ItineraryItemCard` likewise renders any item irrespective of `type`. New `meal`/`activity` rows inserted by B-022 will appear immediately in the day view without any frontend code changes. AC 11 is non-blocking for `[frontend-engineer]` — confirmation only.
+
+### B-022.10 Top 3 risks + mitigations
+
+1. **`bookmarks.place_id` is null on first run** — until B-023 enrichment populates it, every B-022 item will have `place_id = null` and won't appear on the day map. Mitigation: this is expected and matches AC 3's wording ("set from the just-created/looked-up bookmark"). A null bookmark place_id propagates a null item place_id — correct, not a bug. B-023 enrichment is the unblocker; until then the item is visible in the day list but absent from the map.
+2. **Bookmark vs item type mismatch on re-run** — if a user manually changes a Trello card's label from `Restaurants` to `Attractions`, a re-run will UPDATE the bookmark category to `sight` AND the item type to `activity`. Both flip together because both upserts include the changed column. Acceptable for a personal one-shot tool; documented here so [test-engineer] can test the label-flip case if desired.
+3. **Backfill race with a partial regular-import run** — extremely unlikely (single user, sequential CLI) but documented: if regular import is interrupted mid-run and backfill is then invoked, backfill's step 4 set may miss some cards that the partial run had already paired. The duplicate-insert in step 5 will then violate `itinerary_items_trip_source_card_uniq` and throw. Mitigation: catch the unique-violation error code (`23505`), treat as skip, continue loop. Backend engineer adds this catch in R3.
+
+### B-022.11 Open questions for R3
+
+- None blocking. The audit-log renegotiation (B-022.1, last bullet) is the only spec change vs. R1's AC 12. [scrum-master] to confirm acceptable with user before R3 kicks off.
+
+---
+
+## B-023 — Accommodations on day-view map + hotel place-enrichment (R2 architecture)
+
+Extends the day-view map (B-015) to plot accommodations alongside itinerary items, adds a place picker to `AccommodationForm`, and ships a one-shot enrichment script that resolves existing hotel rows' `hotel_name → place_id` via the cached Google Places proxy. Per R1 reconciliation, the day map merges **two** sources only — `itinerary_items` (which post-B-022 already includes day-anchored bookmarks) and `accommodations` covering the date. `bookmarks` is never queried by the map.
+
+### B-023.1 No new migrations required
+
+Verified against `0009_accommodations.sql`:
+
+- `accommodations.place_id uuid null references places(id) on delete set null` — nullable FK already in place (line 39). ✅
+- `accommodations_name_or_place CHECK (place_id is not null or hotel_name is not null)` — the XOR/either constraint is what AC 4 must guard in the form. ✅
+- `accommodations_trip_dates_idx (trip_id, check_in_date, check_out_date)` — sufficient for the day-coverage query in B-023.3. No partial index needed. ✅
+- `accommodations_place_idx (place_id) where place_id is not null` — covers the enrichment script's idempotency filter. ✅
+- `trip_day_accommodation_indicators` view exposes `indicator_type` ∈ {`check_in`, `check_out`, `in_stay`, `same_day`} and is **not** used by the map (its purpose is the day-card chip badge); the map endpoint will read `accommodations` directly to project lat/lng via the `places` FK embed.
+
+**Migration count for B-023: 0.**
+
+### B-023.2 Map-data endpoint shape — DECISION: option (b), new `/days/[dayId]/map`
+
+Three options were on the table:
+
+- **(a) Extend `GET /api/trips/[id]/items?include=accommodations`** — keeps one URL, adds a sibling array (or merged discriminator union). Cons: pollutes a generic list endpoint with a map-specific concern; the existing route already takes `page`/`limit`/`type`/`day_id` filters that don't compose cleanly with a sibling array; pagination semantics become muddled (how do you paginate a sibling array?).
+- **(b) New `GET /api/trips/[id]/days/[dayId]/map`** returning `{ items: ItineraryItemWithPlace[]; accommodations: AccommodationMapMarker[] }`. Day-scoped, single round-trip, two parallel SELECTs server-side via `Promise.all`.
+- **(c) Two parallel client-side fetches** — keep `/items` as-is, add `GET /api/trips/[id]/accommodations?covering=<date>`, merge in React. Cons: two round trips violates the single-round-trip perf contract from AC 2; ties the React layer to a query-shape it doesn't otherwise care about.
+
+**Decision: (b).** Justification:
+
+1. AC 2 demands a single round-trip — (c) violates it on its face.
+2. The day map is the only consumer that needs accommodations-for-this-date plotted; folding it into the items list (a) makes that endpoint do two things and forces every existing items caller to ignore the new field. (b) is a purpose-built endpoint with a tight contract.
+3. The route already has a precedent in the day-id-scoped routes (`/api/trips/[id]/days/[dayId]/...`). It composes cleanly with `DayMapSection` which already knows its `dayId`.
+4. Server-side `Promise.all` of two SELECTs is the standard "single logical round-trip" pattern — neither query depends on the other.
+
+**Contract:**
+
+```
+GET /api/trips/[id]/days/[dayId]/map
+Auth: viewer+ via checkTripAccess; 404 on missing trip/day or non-member.
+Response 200:
+{
+  "items": [
+    {
+      "id": "uuid",
+      "title": "string",
+      "type": "meal" | "activity" | "transport" | ...,
+      "start_time": "HH:MM:SS" | null,
+      "place": { "id": "uuid", "lat": number, "lng": number, "name": "string" } | null
+    }
+  ],
+  "accommodations": [
+    {
+      "accommodation_id": "uuid",
+      "hotel_name": "string",          // coalesced from accommodations.hotel_name OR places.name
+      "indicator_type": "check_in" | "check_out" | "in_stay" | "same_day",
+      "place": { "id": "uuid", "lat": number, "lng": number, "name": "string" }
+      // place is guaranteed non-null — rows with null place_id are filtered out server-side
+      // (consistent with B-015's "plottable means place != null" convention).
+    }
+  ]
+}
+```
+
+Server-side filtering (rather than returning `place: null` rows) keeps the client logic uniform with `DayMap`'s existing `place != null` invariant. The list endpoint at `/items` is left untouched; rendering the day list still uses it. The map section will switch to the new endpoint.
+
+### B-023.3 Day-coverage SQL — exact query shape
+
+The map endpoint resolves the target day's date once, then runs two parallel SELECTs:
+
+```ts
+// 1. Look up the day's date and confirm day belongs to trip (existing pattern).
+const { data: day } = await supabase
+  .from('trip_days')
+  .select('id, date')
+  .eq('id', dayId)
+  .eq('trip_id', tripId)
+  .maybeSingle();
+if (!day) return notFound();
+
+// 2. Parallel SELECTs.
+const [itemsRes, accomRes] = await Promise.all([
+  supabase
+    .from('itinerary_items')
+    .select('id, title, type, start_time, place:places!itinerary_items_place_id_fkey(id, lat, lng, name)')
+    .eq('trip_id', tripId)
+    .eq('day_id', dayId)
+    .order('start_time', { ascending: true, nullsFirst: false })
+    .order('created_at', { ascending: true })
+    .limit(200),                          // Q-1 bound, matches items route cap
+
+  supabase
+    .from('accommodations')
+    .select('id, hotel_name, check_in_date, check_out_date, place:places!accommodations_place_id_fkey(id, lat, lng, name)')
+    .eq('trip_id', tripId)
+    .lte('check_in_date', day.date)
+    .gte('check_out_date', day.date)
+    .not('place_id', 'is', null)          // enrichment idempotency surface
+    .limit(50),                           // Q-1 bound; ≥ a day's hotel realistically caps at 1–2
+]);
+```
+
+Notes:
+
+- The `(trip_id, check_in_date, check_out_date)` composite index covers the `.eq('trip_id') + .lte('check_in_date') + .gte('check_out_date')` filter without a sequential scan.
+- `.not('place_id', 'is', null)` is the **server-side filter** that satisfies AC 3 ("rows without a linked place are absent from the map but still appear in the accommodation list"). Pre-enrichment hotels (`hotel_name` set, `place_id` null) drop out here.
+- `indicator_type` is computed at the API layer in JS from `check_in_date`/`check_out_date` vs `day.date` (same case-expression as the view): cheaper than joining the view; the view exists for the chip-list use case.
+- Embedded `place` from the FK is normalised to `null → row filtered` on the server, matching B-015's invariant.
+
+### B-023.4 Enrichment confidence threshold — DECISION: 3-of-3 conservative rule
+
+Per AC 6: top-1 only above confidence; below threshold = "ambiguous", skip and log.
+
+**Threshold definition.** A candidate Places result is accepted only if **all three** of the following hold:
+
+1. **Name match.** Normalised case-insensitive substring match between Places `name` and `hotel_name`, OR a Jaro-Winkler-like ratio ≥ 0.85 on the lowercased, whitespace-collapsed strings. We use the simpler substring rule first (covers "Park Hyatt Tokyo" vs "Park Hyatt Tokyo"); the similarity ratio only matters if the user typed a partial name. Implementation: substring check using `toLowerCase()` and a single `String.includes` either direction.
+2. **Operational status.** `business_status === 'OPERATIONAL'` if returned by Places (the v1 SearchText API returns `businessStatus`; treat unknown/missing as fail). Closed or temporarily-closed hotels are skipped — a defensive choice for stale Trello hotel cards.
+3. **Top-1 is unambiguous.** If the response has ≥ 2 results, the top-2 result's `name` must NOT pass rule (1) — i.e., the second-best result must be a clearly different hotel. If both #1 and #2 satisfy rule (1) (e.g. "Hilton Tokyo" matched by "Hilton Tokyo Bay" and "Hilton Tokyo Odaiba"), we skip and log `ambiguous: top-2 too similar`.
+
+**On any rule failing → skip + log + summary.skipped++.** Never auto-pick. The logged line follows the B-022 `[plan]`-style format:
+
+```
+[enrich] accommodation <id> "<hotel_name>" → match place_id=<google_place_id> (confidence=accepted)
+[enrich] accommodation <id> "<hotel_name>" → skip (reason=ambiguous_top2 | not_operational | name_no_match | no_results)
+```
+
+**Concrete query.** The script searches via the existing proxy with the verbatim `hotel_name`. No query expansion (no "<hotel> hotel" affix) — we want to fail on bad names rather than over-fit. Top-5 results are inspected (the Places proxy already returns up to ~5).
+
+This threshold is conservative by design: AC 6 explicitly prefers a skip over a mis-link. Manual fix-up in the form is one click; an incorrect FK is silent corruption.
+
+### B-023.5 Enrichment script architecture — DECISION: option (b), via the app's `/api/places/search` proxy
+
+Three options were on the table:
+
+- **(a) Direct DB writes mirroring `import-trello.ts`** — Service-role client; script calls `searchPlaces()` from `app/src/lib/google/places.ts` directly (bypassing the proxy). Pros: matches the existing one-shot-script pattern; no need for a running app. Cons: bypasses cache; bypasses the proxy's `audit_log` `places_searched` events; each call is a fresh Google API hit even if a prior bookmark already cached the same place.
+- **(b) Via the running app's `/api/places/search`** — Script POSTs/GETs the proxy URL with an auth cookie / session; the proxy handles cache-first, rate limit, audit log. Direct DB write for the `accommodations.place_id` patch after the lookup resolves to an internal `places.id`. Pros: free cache (every B-022/B-009 bookmark already enriched populates `places`; many japan-2026 hotels are likely already cached); free attribution; audit events automatic; one code path for Places. Cons: requires `pnpm dev` (or a deployed URL) reachable from the script's machine; auth cookie management; rate-limit shared with user.
+- **(c) Hybrid** — Read the app's `places` cache via service-role for cache lookups; fall back to `searchPlaces()` directly when uncached. Pros: best of both. Cons: extra surface to maintain; two code paths.
+
+**Decision: (b), with a small concession.** The script runs in two phases:
+
+1. **Cache-first via service-role SELECT** — for each accommodation needing enrichment, the script first runs a service-role SELECT on `places` filtered by `name ILIKE '%<hotel_name escaped>%'` AND `cached_at > now() - 7 days` (same TTL as the proxy). If exactly one row matches the confidence rules in B-023.4 (substring + rule 1; rule 3 still required on multiple cache hits), use it — no Google call.
+2. **Network via the proxy** — for cache misses, the script does a fetch to `http://localhost:3000/api/places/search?q=<hotel_name>` using a stored session cookie from `.env.local` (`ENRICH_SESSION_COOKIE`). The proxy applies cache, rate limit, audit log; returns `PlaceSearchResult[]` (each carrying `google_place_id`). The script then resolves `google_place_id → places.id` via another service-role SELECT on `places` (mirrors the pattern in `app/src/app/api/trips/[id]/import/[sourceId]/save/route.ts` lines 121–148), then UPDATEs `accommodations.place_id`.
+
+This hybrid-via-cache lets the script run independently of network when the place is already cached (likely the common case after a few imports), and still benefits from the proxy's caching + attribution on misses. Pure option (a) was rejected because the proxy's audit + cache surface is already a working asset; we should not duplicate it offline.
+
+**Concession:** the script requires the dev server running for cache-miss enrichment. This is documented in the script's header and is acceptable for a one-shot, single-user maintenance tool. If the user prefers a fully-offline script, we can flip to (c) later with no schema change.
+
+**Pseudocode skeleton (matches `import-trello.ts` shape):**
+
+```ts
+// 1. Load env, create service-role client.
+// 2. Fetch rows: SELECT id, hotel_name FROM accommodations
+//    WHERE trip_id = ? AND place_id IS NULL AND hotel_name IS NOT NULL.
+//    (AC 7 idempotency: skip rows with non-null place_id at query time.)
+// 3. For each row:
+//    a. Try cache-first SELECT on places by hotel_name.
+//    b. If miss, fetch the proxy URL.
+//    c. Apply B-023.4 confidence rules to the candidate set.
+//    d. On accept: SELECT places.id WHERE google_place_id = ?, then
+//       UPDATE accommodations SET place_id = ? WHERE id = ? AND place_id IS NULL.
+//       The `place_id IS NULL` guard makes the UPDATE idempotent under concurrent re-runs.
+//    e. On skip: log structured reason; summary.skipped++.
+//    f. await sleep(250ms) before the next iteration (AC 8 polite-pace).
+// 4. Print summary: { enriched, skipped, errors, ambiguous_count, no_match_count }.
+```
+
+`SUPABASE_SERVICE_ROLE_KEY` is the only secret read (AC 9). The proxy session cookie is optional — when absent, only cache-hit enrichments succeed and cache-misses are logged as `skip (reason=no_session)`.
+
+### B-023.6 AccommodationForm place-picker contract
+
+`<PlaceSearchInput>` is dropped into the form above the `Hotel name` field, mirroring B-009 and B-015 usage. Contract:
+
+- **Component reuse.** `PlaceSearchInput` is unchanged; consumer passes `onSelect={(p: PlaceSearchResult) => { ... }}`. On select, the form caches the selected `google_place_id` and the place name in component state.
+- **Resolution to internal `places.id`.** On form submit, if the user picked a place, the form needs the internal `place_id` (uuid). Pattern (from `save/route.ts`): the user-facing submit handler POSTs the `google_place_id` to the create/PATCH endpoint, and the **backend** does the `google_place_id → places.id` resolution (SELECT `places.id` WHERE `google_place_id = ?`; if cache miss because the user typed-then-cleared-then-typed, the backend can call `GET /api/places/[googlePlaceId]` to warm the cache). This puts the resolution in one place and avoids exposing internal `places.id` to the client. **Backend-engineer task:** extend `AccommodationCreate` and `AccommodationPatch` schemas to accept `google_place_id?: string` as an alternative to `place_id`, and resolve it server-side before insert/update.
+- **`accommodations_name_or_place` guard (AC 4).** Client-side validation must enforce: at submit time, **either** `place_id != null` (i.e., a place was picked and not subsequently cleared) **or** `hotel_name.trim() !== ''`. Currently the form already enforces "hotel name required when no place is linked" via `hasPlaceLink`. The new wrinkle: when the user clears the place picker after having one linked (PATCH/edit mode), `hasPlaceLink` becomes false, and `hotel_name` must be present, else show error "Provide a hotel name or link a place." Identical message to the DB constraint's intent. The PATCH payload must explicitly send `place_id: null` to clear (the route's current PATCH supports this, but [backend-engineer] must verify).
+- **Existing edit-mode display preserved.** The "Linked place: …" hint box at line 394–401 stays; clearing the picker hides it.
+- **Hotel name remains editable when a place is linked.** Per the existing hint at line 408–411 ("Optional override of the linked place's name."), the user may still type a custom name. The DB constraint is satisfied because `place_id != null`.
+
+### B-023.7 R2 Query Performance Checklist
+
+| # | Check | Status | Reasoning |
+|---|-------|--------|-----------|
+| Q-1 | List queries bounded | ✅ | Both SELECTs in B-023.3 carry `.limit()` (items 200, accommodations 50). The day-scoped accommodation count realistically peaks at 1–2; 50 is a generous safety ceiling. |
+| Q-2 | No N+1 | ✅ | Two parallel SELECTs via `Promise.all`. PostgREST FK embeds resolve the `places` join in the same query (same pattern as the existing items route). No per-row queries. |
+| Q-3 | Pagination on list endpoints | n/a | This is a day-scoped, fixed-shape map endpoint; not a paginated list. Items pagination remains on `/items`. |
+| Q-4 | Date-bounded analytics queries | n/a | Not analytics. The day-coverage query is index-bounded on `(trip_id, check_in_date, check_out_date)`. |
+
+**P95 budget:** AC 2 demands <500ms. Two parallel SELECTs, each ≤ 50–80ms typical against Supabase under normal load; total wall-time ≤ ~120ms server-side + transport. Comfortable headroom.
+
+### B-023.8 Top 3 risks + mitigations
+
+1. **Cache-only enrichment misses many hotels on first run.** If the dev server isn't running and `ENRICH_SESSION_COOKIE` isn't set, only previously-cached `places` rows can match. Mitigation: document the two-mode run in the script header (cache-only vs full); recommend the user run with the dev server up for the initial Japan-2026 backfill (single one-shot ≈ 9 hotels × 250ms = under 3s of API calls). Acceptable for the personal-project context.
+2. **`AccommodationForm` PATCH cannot represent "clear place link" with the current schema.** If `AccommodationPatch` treats `place_id: undefined` as "unchanged" and has no other way to set it to null, the user can't unlink a place once added. Mitigation: [backend-engineer] verifies the PATCH schema accepts `place_id: null` explicitly (Zod `.nullable()`); if not, extend it. The frontend submits `place_id: null` when the user clears the picker.
+3. **Map endpoint and items list endpoint drift.** Two routes now select itinerary items; if the items embed shape changes in one without the other, the map and list will diverge. Mitigation: extract the items+place select string + transform into a shared helper in `app/src/lib/`; both routes import it. Flagged for [code-reviewer] under shared-file governance.
+
+### B-023.9 Open questions for R3
+
+- **Confirm `AccommodationPatchDTO` representation of "clear `place_id`."** If the current Zod schema requires `place_id` to be a string-or-omitted, [backend-engineer] must adjust to `.nullable().optional()` so the form can send `null` explicitly. Non-blocking for R2 sign-off; surfaces as a small backend change in R3.
+- **`google_place_id` vs `place_id` in the create/PATCH body.** R3 implementation choice: accept either, with a server-side resolver; or require the frontend to call `GET /api/places/[googlePlaceId]` first to warm the cache, then resolve internally. Recommendation in this doc: accept `google_place_id?` in the body and resolve server-side (single round-trip from the client). [backend-engineer] decides on shape.
+

@@ -34,6 +34,7 @@ export type ApiErrorCode =
   | 'accommodation_dates_outside_trip'
   | 'accommodation_dates_invalid'
   | 'accommodation_cost_currency_required'
+  | 'name_or_place_required'
   | 'cannot_demote_sole_owner'
   | 'owner_self_delete_forbidden'
   | 'not_a_member'

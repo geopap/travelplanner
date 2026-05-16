@@ -157,6 +157,73 @@ describe('AccommodationPatch — gated identity refinement', () => {
   });
 });
 
+describe('AccommodationCreate — B-023 google_place_id', () => {
+  const base = {
+    check_in_date: '2026-05-01',
+    check_out_date: '2026-05-03',
+  };
+
+  it('accepts google_place_id only (no hotel_name, no place_id)', () => {
+    expect(
+      AccommodationCreate.safeParse({
+        ...base,
+        google_place_id: 'ChIJN1t_tDeuEmsRUsoyG83frY4',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects too-short google_place_id', () => {
+    expect(
+      AccommodationCreate.safeParse({
+        ...base,
+        google_place_id: 'short',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects google_place_id with invalid characters', () => {
+    expect(
+      AccommodationCreate.safeParse({
+        ...base,
+        google_place_id: 'has spaces are invalid!!',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts long URL-safe google_place_id', () => {
+    expect(
+      AccommodationCreate.safeParse({
+        ...base,
+        google_place_id: 'ChIJ_abc-DEF_123-456-789_abcdefghijklm',
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe('AccommodationPatch — B-023 place_id null + google_place_id', () => {
+  it('accepts explicit place_id: null (clear link)', () => {
+    expect(
+      AccommodationPatch.safeParse({ place_id: null }).success,
+    ).toBe(true);
+  });
+
+  it('accepts google_place_id in patch', () => {
+    expect(
+      AccommodationPatch.safeParse({
+        google_place_id: 'ChIJN1t_tDeuEmsRUsoyG83frY4',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('allows place_id: null in patch (server validates merged state vs existing row)', () => {
+    // The schema permits clearing only place_id; the API route is authoritative
+    // for the merged-state guard against the DB row.
+    expect(
+      AccommodationPatch.safeParse({ place_id: null }).success,
+    ).toBe(true);
+  });
+});
+
 describe('AccommodationRowSchema + mapAccommodationRow', () => {
   const row = {
     id: '00000000-0000-4000-8000-000000000aaa',

@@ -329,6 +329,32 @@ describe('POST /api/trips/[id]/accommodations', () => {
     expect(res.status).toBe(404);
   });
 
+  it('B-023: resolves google_place_id → places.id on POST', async () => {
+    const res = await ACC_POST(
+      mkPost({
+        google_place_id: 'ChIJN1t_tDeuEmsRUsoyG83frY4',
+        check_in_date: '2026-05-01',
+        check_out_date: '2026-05-03',
+      }),
+      tripCtx,
+    );
+    expect(res.status).toBe(201);
+    expect(state.capturedInsert?.place_id).toBe(PLACE_ID);
+  });
+
+  it('B-023: rejects POST with both place_id and google_place_id', async () => {
+    const res = await ACC_POST(
+      mkPost({
+        place_id: PLACE_ID,
+        google_place_id: 'ChIJN1t_tDeuEmsRUsoyG83frY4',
+        check_in_date: '2026-05-01',
+        check_out_date: '2026-05-03',
+      }),
+      tripCtx,
+    );
+    expect(res.status).toBe(400);
+  });
+
   it('audit metadata excludes hotel_name and place_id raw values (privacy regression)', async () => {
     await ACC_POST(
       mkPost({
@@ -379,6 +405,88 @@ describe('PATCH /api/trips/[id]/accommodations/[id]', () => {
     role = 'none';
     const res = await ACC_PATCH(mkPatch({ confirmation: 'X' }), accCtx);
     expect(res.status).toBe(404);
+  });
+
+  it('B-023: accepts explicit place_id: null (clear link) when hotel_name exists', async () => {
+    state.existing = {
+      id: ACC_ID,
+      trip_id: FIXED_TRIP_ID,
+      place_id: PLACE_ID,
+      hotel_name: 'Park Hyatt',
+      check_in_date: '2026-05-01',
+      check_out_date: '2026-05-03',
+      cost_per_night: null,
+      total_cost: null,
+      currency: null,
+    };
+    const res = await ACC_PATCH(mkPatch({ place_id: null }), accCtx);
+    expect(res.status).toBe(200);
+    expect(state.capturedUpdate).not.toBeNull();
+    expect(
+      Object.prototype.hasOwnProperty.call(state.capturedUpdate, 'place_id'),
+    ).toBe(true);
+    expect(state.capturedUpdate?.place_id).toBeNull();
+  });
+
+  it('B-023: rejects place_id: null when hotel_name is also empty (name_or_place_required)', async () => {
+    state.existing = {
+      id: ACC_ID,
+      trip_id: FIXED_TRIP_ID,
+      place_id: PLACE_ID,
+      hotel_name: null, // existing has no hotel_name; relies on place_id
+      check_in_date: '2026-05-01',
+      check_out_date: '2026-05-03',
+      cost_per_night: null,
+      total_cost: null,
+      currency: null,
+    };
+    const res = await ACC_PATCH(mkPatch({ place_id: null }), accCtx);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('name_or_place_required');
+  });
+
+  it('B-023: resolves google_place_id → places.id on PATCH', async () => {
+    state.existing = {
+      id: ACC_ID,
+      trip_id: FIXED_TRIP_ID,
+      place_id: null,
+      hotel_name: 'Park Hyatt',
+      check_in_date: '2026-05-01',
+      check_out_date: '2026-05-03',
+      cost_per_night: null,
+      total_cost: null,
+      currency: null,
+    };
+    const res = await ACC_PATCH(
+      mkPatch({ google_place_id: 'ChIJN1t_tDeuEmsRUsoyG83frY4' }),
+      accCtx,
+    );
+    expect(res.status).toBe(200);
+    // Mock returns PLACE_ID for the resolveGooglePlaceId lookup.
+    expect(state.capturedUpdate?.place_id).toBe(PLACE_ID);
+  });
+
+  it('B-023: rejects sending both place_id and google_place_id with 400', async () => {
+    state.existing = {
+      id: ACC_ID,
+      trip_id: FIXED_TRIP_ID,
+      place_id: null,
+      hotel_name: 'h',
+      check_in_date: '2026-05-01',
+      check_out_date: '2026-05-03',
+      cost_per_night: null,
+      total_cost: null,
+      currency: null,
+    };
+    const res = await ACC_PATCH(
+      mkPatch({
+        place_id: PLACE_ID,
+        google_place_id: 'ChIJN1t_tDeuEmsRUsoyG83frY4',
+      }),
+      accCtx,
+    );
+    expect(res.status).toBe(400);
   });
 
   it('400 dates outside trip range when patching dates', async () => {
