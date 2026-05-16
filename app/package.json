@@ -15,15 +15,18 @@
     "enrich:bookmarks": "tsx scripts/enrich-bookmarks.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.65.0",
     "@supabase/auth-helpers-nextjs": "^0.15.0",
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.104.1",
+    "cheerio": "^1.0.0",
     "leaflet": "^1.9.4",
     "lucide-react": "^1.9.0",
     "next": "16.2.4",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-leaflet": "^5.0.0",
+    "youtube-transcript": "^1.2.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {

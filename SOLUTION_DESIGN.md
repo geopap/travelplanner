@@ -2593,3 +2593,285 @@ These were identified during Sprint 4 review/test but deliberately deferred — 
 ## Build Deviations
 
 *(deviations from this R2 baseline, recorded at R7 close of each sprint)*
+
+---
+
+## B-021 — Social media import — R0 spike
+
+R0 discovery output for the L item in Sprint 5. No code shipped in this round except the migration SQL below. Scope: single-user, low-volume personal app — biases every decision toward "least dependency, least maintenance burden, ship it."
+
+### 1. YouTube transcript fetching — DECISION: `youtube-transcript` npm package
+
+- **Official Data API v3 + `captions.download`** requires an OAuth-authorized user who owns the video (or a video with public captions and a billing-enabled project). For arbitrary public videos the caller does not own, `captions.download` returns 403. That kills the use case (we want any travel vlogger's video).
+- **`youtube-transcript` (npm)** scrapes the public timed-text endpoint YouTube serves to its own web player. No auth, no quota, ~3kB dependency. ToS-grey but the same surface Invidious/yt-dlp consume; risk profile is acceptable for a personal app with one user.
+- **Fallback when captions are disabled** (a known failure mode — covered in Risks): fetch the watch page HTML, extract `<meta name="description">` + `<title>` via cheerio, ship that to Claude. Captions-disabled is the dominant failure mode (~30% of travel vlogs), so this fallback is mandatory, not optional.
+- **Rejected:** building our own innertube client (too brittle), paying for a SaaS transcript service (overkill).
+
+### 2. X/Twitter + generic web fetch — DECISION: `cheerio` + manual OG/Twitter-card parsing (no scraper library)
+
+- **`metascraper`** is a 20-plugin meta-framework. Each plugin pulls its own deps. For a single-user app extracting `og:title` / `og:description` / `og:image` / `twitter:description`, this is an order of magnitude too much surface.
+- **`unfurl.js`** is leaner but unmaintained since 2023; no thanks.
+- **Manual cheerio** is ~30 lines: `cheerio.load(html); $('meta[property="og:description"]').attr('content')`. We already need cheerio for the YouTube fallback (decision 1), so adding zero deps. Easier to debug, easier to extend per-domain when a target site needs a tweak.
+- **X/Twitter specifically:** unauth fetch of `twitter.com/<user>/status/<id>` now redirects to login. Use `https://publish.twitter.com/oembed?url=<tweet-url>` (Twitter's own oEmbed endpoint, no auth, public) — returns `html` field containing the rendered tweet, which we strip-tag with cheerio. If oEmbed 404s (deleted/protected tweet), surface "Paste the tweet text instead."
+
+### 3. Instagram / TikTok — DECISION: v1 = paste-text only, confirmed
+
+- Instagram Graph API requires a Facebook Business asset and approved app review. TikTok Display API requires an approved developer account. Both gate on weeks of paperwork for a personal app.
+- Unauth scraping of both is actively adversarial: Instagram serves a login wall on the second request from any IP; TikTok rotates obfuscation.
+- **Decision:** UI shows "Instagram/TikTok? Paste the caption text into the text box below." `source_type = 'text'` covers this path; no Instagram/TikTok-specific code in v1. Revisit only if the user repeatedly hits the path.
+
+### 4. Claude extraction call — DECISION: Haiku 4.5 with tool-use structured output
+
+- Model: `claude-haiku-4-5` (latest Haiku at 2026-05-15). Sonnet is overkill; Opus is wildly overkill.
+- Structured output via `tool_use`. Define a single tool `record_extraction` with the input schema:
+  ```json
+  {
+    "type": "object",
+    "required": ["places", "tips"],
+    "properties": {
+      "places": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["name", "category", "why"],
+          "properties": {
+            "name":     { "type": "string", "minLength": 1, "maxLength": 200 },
+            "category": { "type": "string", "enum": ["restaurant","cafe","bar","attraction","shop","viewpoint","other"] },
+            "why":      { "type": "string", "minLength": 1, "maxLength": 500 }
+          }
+        }
+      },
+      "tips": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 500 } }
+    }
+  }
+  ```
+  Force the tool: `tool_choice: { type: "tool", name: "record_extraction" }`. This guarantees JSON-valid output — no regex parsing, no prose stripping. Categories match the enum used by `bookmarks.category`, so review-screen mapping is a no-op.
+- **Cost ceiling per import** (Haiku 4.5 pricing as of 2026-05: $1/MTok in, $5/MTok out). Worst case input: 6kB transcript + ~500 token system prompt ≈ 2.5k input tokens. Output: tool call payload ≈ 600 tokens. Per import: `(2500/1e6)*1 + (600/1e6)*5 = $0.0025 + $0.003 = $0.0055`. Under the 20/hr rate limit (decision 6) that caps at ~$0.11/hr/user — trivially safe for a single-user app.
+- **No prompt caching for v1** — system prompt is short and each import is one-shot; cache TTL would expire between invocations. Revisit only if usage pattern shifts to batch.
+
+### 5. Schema delta — migration `0017_import_sources.sql`
+
+(File `0015_` is taken by Trello fix, `0016_` by trip-members FK — this lands as `0017`.)
+
+```sql
+-- 0017_import_sources.sql
+-- Creates import_sources for B-021 social-media import traceability,
+-- and adds bookmarks.import_source_id (nullable FK).
+
+begin;
+
+-- 1. Enum types
+create type public.import_source_type as enum ('youtube','twitter','web','text');
+create type public.import_source_status as enum ('pending','reviewed','saved','discarded');
+
+-- 2. import_sources table
+create table public.import_sources (
+  id              uuid primary key default gen_random_uuid(),
+  trip_id         uuid not null references public.trips(id) on delete cascade,
+  created_by      uuid not null references auth.users(id) on delete restrict,
+  source_url      text,
+  source_type     public.import_source_type not null,
+  raw_text        text not null,
+  extracted_json  jsonb not null default '{}'::jsonb,
+  status          public.import_source_status not null default 'pending',
+  created_at      timestamptz not null default now(),
+  constraint import_sources_url_or_text check (
+    source_url is not null or source_type = 'text'
+  )
+);
+
+create index import_sources_trip_id_idx on public.import_sources(trip_id, created_at desc);
+create index import_sources_created_by_idx on public.import_sources(created_by);
+
+-- 3. bookmarks FK back-link
+alter table public.bookmarks
+  add column import_source_id uuid
+  references public.import_sources(id) on delete set null;
+
+create index bookmarks_import_source_id_idx
+  on public.bookmarks(import_source_id)
+  where import_source_id is not null;
+
+-- 4. RLS — trip members read; only editor/owner write
+alter table public.import_sources enable row level security;
+
+create policy import_sources_select on public.import_sources
+  for select using (public.is_trip_member(trip_id, 'viewer'));
+
+create policy import_sources_insert on public.import_sources
+  for insert with check (
+    public.is_trip_member(trip_id, 'editor') and created_by = auth.uid()
+  );
+
+create policy import_sources_update on public.import_sources
+  for update
+  using (public.is_trip_member(trip_id, 'editor'))
+  with check (public.is_trip_member(trip_id, 'editor'));
+
+create policy import_sources_delete on public.import_sources
+  for delete using (public.is_trip_member(trip_id, 'editor'));
+
+commit;
+```
+
+**Rollback (`0017_import_sources_rollback.sql`):**
+
+```sql
+begin;
+drop index if exists public.bookmarks_import_source_id_idx;
+alter table public.bookmarks drop column if exists import_source_id;
+drop table if exists public.import_sources;
+drop type if exists public.import_source_status;
+drop type if exists public.import_source_type;
+commit;
+```
+
+Viewers can READ the source row (audit trail) but cannot create/edit/delete — matches the AC-7 authorization spec. `with check` on update prevents `trip_id` re-pointing (same lesson as 0014 `expenses_update`).
+
+### 6. API contract
+
+Two endpoints, both under the trip scope so the existing `[id]` membership guard pattern (per `app/src/app/api/trips/[id]/bookmarks/route.ts`) applies directly.
+
+**`POST /api/trips/[id]/import/extract`**
+- Body: `{ source_url?: string, raw_text?: string }` — exactly one required (Zod refinement).
+- Auth: signed-in user; `is_trip_member(id, 'editor')` check at top of handler (defense-in-depth above RLS).
+- Server steps: classify source → fetch (YouTube transcript / oEmbed / generic OG / raw text passthrough) → Claude Haiku tool-call → insert `import_sources` row with `status='pending'`, `extracted_json={places,tips}` → return `{ import_source_id, source_type, extracted: { places, tips } }`.
+- Errors: `400` (no url/text or both); `403` (not editor); `415` (unsupported domain — IG/TikTok URL); `429` (rate limit); `502` (LLM error after one retry); `504` (fetch timeout 10s).
+
+**`POST /api/trips/[id]/import/[sourceId]/save`**
+- Body:
+  ```ts
+  {
+    confirmed_places: Array<{
+      name: string;
+      google_place_id?: string;  // present if user picked from autocomplete
+      category: BookmarkCategory;
+      save: boolean;             // user can deselect on review screen
+    }>;
+    save_tips_as_note: boolean;
+  }
+  ```
+- Auth: editor + verifies `import_sources.id = sourceId AND trip_id = id`.
+- Server steps: single transaction — for each `save:true` place, upsert via existing Places cache flow (B-009/B-010) to get `place_id`, insert `bookmarks` row with `import_source_id = sourceId`; if `save_tips_as_note` and `tips.length > 0`, insert one `itinerary_items` row on the trip's first `trip_day` with `kind='note'`, `title='Tips from <source>'`; flip `import_sources.status` to `'saved'`. Return `{ bookmark_ids: uuid[], itinerary_item_id?: uuid }`.
+- All-or-nothing: any place-save failure rolls back the transaction (no partial writes — AC-11).
+
+**Rate limit — DECISION: application-middleware (not RLS).** 20 imports / user / rolling hour. RLS cannot count by time; pg_cron is overkill. Implement with a lightweight `rate_limits` in-memory map keyed by `user_id` for v1 (single Node instance on Vercel — acceptable; if we ever scale to multiple instances, swap to a Supabase `rate_limits` table with `cleanup` cron). Applied only on `/extract` (the LLM-cost path), not `/save`.
+
+### 7. Frontend structure
+
+Single page `/trips/[id]/import` with two URL-driven states:
+
+- **State A — paste form** (default): tabs "Paste URL" / "Paste text". Submits to `/extract`. Skeleton during fetch+LLM call (typically 3-8s — show progress copy: "Reading source… → Extracting places…").
+- **State B — review screen** (after extract returns, identified by `?source=<sourceId>` query param so refresh is safe): one card per extracted place. Each card embeds the existing **Places autocomplete component from B-009** (`<PlaceAutocomplete defaultQuery={extracted.name} />`), a category select pre-set from the extraction, a "save this" checkbox (default ON), and a read-only "why" blurb. Below the place cards: an expandable "Tips" panel with a checkbox "Save tips as note on Day 1." A single "Save N places" button POSTs to `/save`.
+
+No new components needed besides the page itself and a small `<ImportReviewCard>` wrapper. The autocomplete, category select, and confirm-dialog components all exist.
+
+### 8. Risks + mitigations (top 3)
+
+1. **LLM hallucinates addresses/places not actually in the source.** The review screen with mandatory Places-autocomplete confirmation is the mitigation — the user must positively confirm each place against Google Places before it becomes a bookmark. The "save" checkbox defaults ON for low friction but the autocomplete will refuse to resolve a hallucinated name, surfacing the issue.
+2. **YouTube captions disabled on ~30% of travel vlogs.** Fallback path in decision 1: fetch watch-page HTML, extract title + description meta with cheerio, ship that to Claude. The LLM still produces reasonable extraction from a good video description. UI surfaces "Captions unavailable — used video description instead" so the user knows expectation is lower.
+3. **Scrape-blocking on web sources (Cloudflare, login walls).** Mitigation: 10s fetch timeout, single attempt, on any non-2xx response surface "Couldn't read that page — paste the text instead" with the text-paste tab pre-selected. No retries with rotating user-agents — that's an arms race we don't want to enter for one user.
+
+### B-021 spike — open items requiring user input
+
+- `ANTHROPIC_API_KEY` provisioning in `.env.local` + Vercel (already flagged on SPRINT.md L69).
+- Confirm `claude-haiku-4-5` model id is available on the user's Anthropic account (Tier 1+ access required).
+
+---
+
+## B-015 — Day-view map (Sprint 5, R2)
+
+Adds a collapsible Leaflet map to each day view, plotting itinerary items whose `place_id` resolves to a `places` row with non-null `lat`/`lng`. Personal-project scope: boring defaults, no clustering, no routing, no custom tile server.
+
+### B-015.1 Migration `0018_itinerary_items_place_id.sql`
+
+- `alter table public.itinerary_items add column place_id uuid null references public.places(id) on delete set null;`
+- `create index idx_itinerary_items_place_id on public.itinerary_items (place_id) where place_id is not null;` (partial — most rows are null in v1)
+- No RLS changes. `itinerary_items` is already trip-membership RLS'd; `places` is read-all-authenticated (0004_places.sql). LEFT JOIN through `place_id` is therefore safe for every member role, including `viewer` (AC-9).
+- Rollback (`0018_..._rollback.sql`): drops index, drops column. Data loss is only the place linkage; itinerary rows untouched.
+
+### B-015.2 API contract — extend `GET /api/trips/[id]/items`
+
+The existing endpoint at `app/src/app/api/trips/[id]/items/route.ts` accepts `?day_id=<uuid>` and returns paginated `itinerary_items`. We extend its `select` to embed the joined place via PostgREST's FK-embed syntax. No new route is added — the day view already calls this endpoint with `day_id`.
+
+Supabase select string:
+
+```ts
+.from('itinerary_items')
+.select(`
+  *,
+  place:places!itinerary_items_place_id_fkey ( id, lat, lng, name )
+`, { count: 'exact' })
+.eq('trip_id', id)
+.eq('day_id', dayIdFilter)
+```
+
+PostgREST executes this as a single LEFT JOIN on `place_id` — no N+1 (Q-2 ✅). Response shape per item:
+
+```ts
+type ItineraryItemWithPlace = ItineraryItemRow & {
+  place: { id: string; lat: number; lng: number; name: string } | null;
+};
+```
+
+`place` is `null` when `place_id` is null OR when the FK resolves to a place row with null coords (defensive — narrowed in validation). Backend extends `ItineraryItemRowSchema` with an optional `place` field (or adds a sibling `ItineraryItemWithPlaceSchema`); existing callers ignore the extra key. Pagination, ordering, role gating, and trip-access checks unchanged.
+
+### B-015.3 Frontend file layout
+
+- `app/src/components/map/DayMap.tsx` — the Leaflet renderer. Pure client component (`'use client'`). Receives `items: Array<{ id, title, start_time, place }>` already filtered to the day. Renders `MapContainer` + `TileLayer` + one `Marker`+`Popup` per mapped item. Imports `leaflet/dist/leaflet.css` at top. Applies the well-known webpack marker-icon fix once at module scope:
+
+  ```ts
+  import L from 'leaflet';
+  import iconUrl from 'leaflet/dist/images/marker-icon.png';
+  import iconRetinaUrl from 'leaflet/dist/images/marker-icon-2x.png';
+  import shadowUrl from 'leaflet/dist/images/marker-shadow.png';
+  // Default-icon URL fix for bundlers that don't resolve Leaflet's CSS-relative paths.
+  L.Icon.Default.mergeOptions({ iconUrl, iconRetinaUrl, shadowUrl });
+  ```
+
+- `app/src/components/map/DayMapSection.tsx` — SSR-safe wrapper. Loads `DayMap` via `next/dynamic(() => import('./DayMap'), { ssr: false, loading: () => <MapSkeleton /> })` to avoid Leaflet's `window` reference crashing SSR (AC-7). Owns the collapsed/expanded state and the empty-state line. Renders nothing of the map when `mappedItems.length === 0` — only a single muted line "No mapped stops for this day." inside the collapse header (AC-6).
+- Day-view page (`app/src/app/trips/[id]/itinerary/...` — existing) imports `DayMapSection` and passes the day's items.
+
+### B-015.4 Tile source + attribution
+
+- URL template: `https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png` (OSM default — no API key, no per-request cost, acceptable for single-user volume).
+- Attribution (required by OSM licence, AC-8): `'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'` — passed as `attribution` prop on `<TileLayer>`. Leaflet renders this in the bottom-right by default; CSS must not obscure it.
+
+### B-015.5 State + bounds
+
+- Per-day collapse state persisted in `localStorage`, key `tp.b015.dayMap.<tripId>.<dayId>` → `'open' | 'closed'`. Default `closed` on first visit (AC-4 implies user opens it; collapsed-by-default matches the "hide entirely when empty" UX of AC-6).
+- Bounds: on mount AND on every transition from collapsed → expanded, compute `L.latLngBounds(mappedItems.map(i => [i.place.lat, i.place.lng])).pad(0.15)` and call `map.fitBounds(...)` via a `useMap()` child component (re-fit on re-open, AC-4).
+- Single marker case: `pad(0.15)` still produces a sensible viewport; no special-case needed.
+
+### B-015.6 NPM dependencies
+
+Add to `app/package.json` (versions verified compatible with React 19.2 + Next.js 16.2):
+
+- `leaflet` — `^1.9.4`
+- `react-leaflet` — `^5.0.0` (v5 is the first line with React 19 peer support)
+- `@types/leaflet` — `^1.9.21` (devDependency)
+
+No other deps. No clustering library (`leaflet.markercluster`) in v1 — a single trip-day rarely exceeds ~15 markers.
+
+### B-015.7 Performance plan (AC-10 < 500ms P95)
+
+- Single LEFT JOIN via PostgREST embed — one round trip, no N+1.
+- Existing `itinerary_items_day_idx (day_id)` already covers the `eq('day_id', ...)` filter.
+- New partial index `idx_itinerary_items_place_id` covers the embed's join probe for the subset of rows with a resolved place.
+- `places(id)` is the table's PK — embed lookup is index-only.
+- Typical day: 5–20 items, ~50% with place_id → < 30ms in Supabase under normal load. Well inside the 500ms P95 budget.
+
+### B-015.8 R2 Q-Checklist
+
+| # | Check | Status |
+|---|-------|--------|
+| Q-1 | List queries bounded | ✅ existing `ItemsPageSchema` (max limit 200) unchanged |
+| Q-2 | No N+1 | ✅ single PostgREST embed, one query |
+| Q-3 | Pagination on list endpoints | ✅ unchanged from current route |
+| Q-4 | Date-bounded analytics queries | n/a (not analytics) |
+
+### B-015.9 Security notes for R4
+
+- No new route, no new auth surface — review-scope is the embed select only.
+- `viewer` role: existing RLS already allows SELECT on `itinerary_items` for any member; viewer renders the map identically; no write paths in DayMap/DayMapSection (AC-9).
+- Tile requests go directly from the browser to OSM — no server-side proxy, no API key, no leakage risk.
