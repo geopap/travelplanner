@@ -17,9 +17,11 @@ import {
   forbidden,
   notFound,
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
 } from '@/lib/api/response';
+import { POSTGRES_RLS_VIOLATION_CODE, requireFreshSession } from '@/lib/api/auth-guard';
 import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
 
@@ -143,6 +145,9 @@ export async function POST(
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
 
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
+
     let body: unknown;
     try {
       body = await request.json();
@@ -241,6 +246,7 @@ export async function POST(
           400,
         );
       }
+      if (insertErr.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
       return serverError();
     }
 

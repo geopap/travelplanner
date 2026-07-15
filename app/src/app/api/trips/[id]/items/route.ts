@@ -15,9 +15,11 @@ import {
   forbidden,
   notFound,
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
 } from '@/lib/api/response';
+import { POSTGRES_RLS_VIOLATION_CODE, requireFreshSession } from '@/lib/api/auth-guard';
 import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
 
@@ -165,6 +167,9 @@ export async function POST(
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
 
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
+
     let body: unknown;
     try {
       body = await request.json();
@@ -203,6 +208,7 @@ export async function POST(
         if (rpcErr.message?.includes('day_not_in_trip')) {
           return badRequest('Target day does not belong to this trip');
         }
+        if (rpcErr.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
         return serverError();
       }
       const rpcParsed = TransportRpcResultSchema.safeParse(rpcRaw);
@@ -306,7 +312,10 @@ export async function POST(
       })
       .select('*')
       .single();
-    if (error || !data) return serverError();
+    if (error || !data) {
+      if (error?.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
+      return serverError();
+    }
 
     const dataParsed = ItineraryItemRowSchema.safeParse(data);
     if (!dataParsed.success) return serverError();

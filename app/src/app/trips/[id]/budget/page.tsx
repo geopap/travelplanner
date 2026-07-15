@@ -57,7 +57,7 @@ export default async function TripBudgetPage({
   const supabase = await createSupabaseServerClient();
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) {
-    redirect(`/sign-in?next=/trips/${encodeURIComponent(tripId)}/budget`);
+    redirect(`/sign-in?redirect=/trips/${encodeURIComponent(tripId)}/budget`);
   }
 
   const access = await checkTripAccess(supabase, tripId, auth.user.id, "viewer");
@@ -120,7 +120,7 @@ export default async function TripBudgetPage({
   }
 
   return (
-    <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-10">
+    <main className="mx-auto w-full max-w-3xl">
       <header className="mb-6 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
         <div>
           <Link
@@ -133,7 +133,7 @@ export default async function TripBudgetPage({
             Budget
           </h1>
           <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            Track expenses, see what's left of your budget, and check who
+            Track expenses, see what&apos;s left of your budget, and check who
             owes whom.
           </p>
         </div>

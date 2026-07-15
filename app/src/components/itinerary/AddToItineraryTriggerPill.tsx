@@ -12,6 +12,7 @@ import {
   AddToItineraryDialog,
   type AddToItineraryCategory,
 } from "@/components/itinerary/AddToItineraryDialog";
+import { SkeletonLine } from "@/components/Skeletons";
 
 interface AddToItineraryTriggerPillProps {
   tripId: string;
@@ -92,12 +93,9 @@ export function AddToItineraryTriggerPill({
         Add to itinerary
       </button>
       {open && daysState.kind === "loading" && (
-        <span
-          role="status"
-          aria-live="polite"
-          className="text-xs text-zinc-500"
-        >
-          Loading days…
+        <span role="status" aria-live="polite" className="inline-flex">
+          <SkeletonLine className="h-4 w-24" />
+          <span className="sr-only">Loading days…</span>
         </span>
       )}
       {open && daysState.kind === "error" && (

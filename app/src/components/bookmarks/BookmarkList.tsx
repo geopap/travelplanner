@@ -33,6 +33,7 @@ import { BookmarkDeleteDialog } from "./BookmarkDeleteDialog";
 import { AddPlaceDialog } from "@/components/places/AddPlaceDialog";
 import { AddToItineraryDialog } from "@/components/itinerary/AddToItineraryDialog";
 import { primaryButtonClass } from "@/components/ui/FormField";
+import { SkeletonLine } from "@/components/Skeletons";
 import { apiFetch, ApiClientError } from "@/lib/utils/api-client";
 import type { TripDay } from "@/lib/types/domain";
 
@@ -594,9 +595,10 @@ export function BookmarkList({
         />
       )}
       {daysLoading && (
-        <span className="sr-only" role="status" aria-live="polite">
-          Loading trip days…
-        </span>
+        <div role="status" aria-live="polite">
+          <SkeletonLine className="h-4 w-32" />
+          <span className="sr-only">Loading trip days…</span>
+        </div>
       )}
 
       {canWrite && (

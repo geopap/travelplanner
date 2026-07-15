@@ -247,6 +247,14 @@ vi.mock('@/lib/supabase/server', () => ({
   createSupabaseServerClient: async () => ({
     auth: {
       getUser: async () => ({ data: { user: state.authUser } }),
+      getSession: async () => ({
+        data: { session: { user: state.authUser, expires_at: Math.floor(Date.now() / 1000) + 3600 } },
+        error: null,
+      }),
+      refreshSession: async () => ({
+        data: { session: { user: state.authUser, expires_at: Math.floor(Date.now() / 1000) + 3600 } },
+        error: null,
+      }),
     },
     from: (t: string) => makeChain(t),
     rpc: async (name: string, _args: Record<string, unknown>) => {

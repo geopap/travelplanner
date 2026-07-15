@@ -16,9 +16,11 @@ import {
   notFound,
   rateLimited,
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
 } from '@/lib/api/response';
+import { POSTGRES_RLS_VIOLATION_CODE, requireFreshSession } from '@/lib/api/auth-guard';
 import { checkTripAccess } from '@/lib/trip-access';
 import { checkRateLimit } from '@/lib/rate-limit';
 import { logAudit } from '@/lib/audit';
@@ -63,6 +65,9 @@ export async function POST(
     if (!access.ok) {
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
+
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
 
     const rl = checkRateLimit(
       `bookmarks:create:user:${userId}:trip:${tripId}`,
@@ -125,6 +130,7 @@ export async function POST(
           409,
         );
       }
+      if (insertErr.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
       return serverError();
     }
     if (!inserted) return serverError();

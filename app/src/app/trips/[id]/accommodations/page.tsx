@@ -36,7 +36,7 @@ export default async function TripAccommodationsPage({
   const { data: auth } = await supabase.auth.getUser();
   if (!auth.user) {
     redirect(
-      `/sign-in?next=/trips/${encodeURIComponent(tripId)}/accommodations`,
+      `/sign-in?redirect=/trips/${encodeURIComponent(tripId)}/accommodations`,
     );
   }
 
@@ -61,7 +61,7 @@ export default async function TripAccommodationsPage({
   const trip = tripParsed.data;
 
   return (
-    <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-10">
+    <main className="mx-auto w-full max-w-3xl">
       <header className="mb-6 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
         <div>
           <Link

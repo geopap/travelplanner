@@ -16,9 +16,11 @@ import {
   notFound,
   rateLimited,
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
 } from '@/lib/api/response';
+import { requireFreshSession } from '@/lib/api/auth-guard';
 
 type RouteCtx = { params: Promise<{ id: string }> };
 
@@ -56,6 +58,9 @@ export async function POST(
     if (!access.ok) {
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
+
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
 
     // Per-user rate limit — mirrors places:details:user:<uid> shape.
     const rl = checkRateLimit(

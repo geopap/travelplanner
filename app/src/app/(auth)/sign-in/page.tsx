@@ -11,6 +11,7 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   const params = await searchParams;
   const noticeRaw = Array.isArray(params.notice) ? params.notice[0] : params.notice;
   const showInviteOnly = noticeRaw === "invite_only";
+  const showSessionExpired = noticeRaw === "session_expired";
 
   return (
     <div className="w-full max-w-md mx-auto space-y-4">
@@ -22,6 +23,15 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
         >
           Sign-up is invitation-only. If you were invited, open your invitation
           link to create an account.
+        </div>
+      )}
+      {showSessionExpired && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/50 p-3 text-sm text-amber-800 dark:text-amber-200"
+        >
+          Your session expired. Please sign in again to continue.
         </div>
       )}
       <Suspense fallback={null}>

@@ -405,6 +405,27 @@ export function ItineraryView({ tripId }: ItineraryViewProps) {
         </div>
       </div>
 
+      {/* Mobile day picker — sticky, horizontally scrollable chip bar.
+          Hidden at lg where the sidebar takes over. No active-day state
+          exists, so no aria-current is applied. */}
+      <nav
+        aria-label="Day picker"
+        className="lg:hidden sticky top-0 z-10 -mx-4 sm:-mx-6 px-4 sm:px-6 py-2 mb-4 bg-zinc-50/90 dark:bg-zinc-950/90 backdrop-blur border-b border-zinc-200 dark:border-zinc-800 overflow-x-auto"
+      >
+        <ul className="flex gap-2 w-max">
+          {daySidebarItems.map((d) => (
+            <li key={d.id}>
+              <a
+                href={`#day-${d.day_number}`}
+                className="inline-flex items-center whitespace-nowrap rounded-full border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              >
+                Day {d.day_number}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </nav>
+
       <div className="grid gap-6 lg:grid-cols-[220px_1fr]">
         <nav
           aria-label="Day picker"

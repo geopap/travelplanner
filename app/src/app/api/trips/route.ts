@@ -6,9 +6,11 @@ import { createSupabaseServerClient } from '@/lib/supabase/server';
 import {
   badRequest,
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
 } from '@/lib/api/response';
+import { POSTGRES_RLS_VIOLATION_CODE, requireFreshSession } from '@/lib/api/auth-guard';
 import { logAudit } from '@/lib/audit';
 import type { MemberRole, Trip, TripDay } from '@/lib/types/domain';
 
@@ -79,6 +81,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     if (!authData.user) return unauthorized();
     const userId = authData.user.id;
 
+    // B-045 — proactive freshness check guards against the 1h-idle-tab case
+    // where PostgREST decodes the stale JWT (so getUser() succeeds) but RLS
+    // WITH-CHECK on INSERT rejects with 42501. Runs before any membership check
+    // because POST creates the trip — there is no existing trip to gate on.
+    const fresh = await requireFreshSession(supabase, authData.user);
+    if (!fresh.ok) return sessionExpired();
+
     let body: unknown;
     try {
       body = await request.json();
@@ -104,7 +113,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       .select('*')
       .single();
 
-    if (error || !trip) return serverError();
+    if (error || !trip) {
+      if (error?.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
+      return serverError();
+    }
 
     // Seed trip_days — one row per calendar day inclusive.
     const dayCount = daysBetween(input.start_date, input.end_date) + 1;
@@ -128,6 +140,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       // Roll back the trip — editor RLS on trip_members seed should make this
       // rare, but handle defensively.
       await supabase.from('trips').delete().eq('id', trip.id);
+      if (daysErr.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
       return serverError();
     }
 

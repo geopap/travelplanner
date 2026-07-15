@@ -14,7 +14,7 @@ import {
   formatCurrency,
   formatDate,
 } from "@/lib/utils/format";
-import { SkeletonCard } from "@/components/Skeletons";
+import { SkeletonCard, SkeletonLine } from "@/components/Skeletons";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { TransportSummary } from "@/components/trip-overview/TransportSummary";
 import { AccommodationsSummary } from "@/components/accommodations/AccommodationsSummary";
@@ -126,9 +126,26 @@ export function TripOverview({ tripId }: TripOverviewProps) {
   }
 
   if (state.status === "loading") {
+    // Mirrors the loaded layout (header, 4-stat grid, summary card) so the
+    // page doesn't shift when data arrives.
     return (
       <div className="space-y-4">
-        <SkeletonCard />
+        <div className="mb-6">
+          <SkeletonLine className="h-3 w-32 mb-2" />
+          <SkeletonLine className="h-8 w-2/3 mb-2" />
+          <SkeletonLine className="h-4 w-1/3" />
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div
+              key={i}
+              className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4"
+            >
+              <SkeletonLine className="h-3 w-16 mb-2" />
+              <SkeletonLine className="h-5 w-24" />
+            </div>
+          ))}
+        </div>
         <SkeletonCard />
       </div>
     );

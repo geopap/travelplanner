@@ -93,7 +93,7 @@ describe('BookmarkItem — Add to itinerary affordance', () => {
   it('hidden when bookmark has null place_id (cannot resolve title)', () => {
     render(
       <BookmarkItem
-        bookmark={makeBookmark({ place_id: null, place: null })}
+        bookmark={makeBookmark({ place_id: null, place: undefined })}
         role="editor"
         onEdit={() => undefined}
         onDelete={() => undefined}

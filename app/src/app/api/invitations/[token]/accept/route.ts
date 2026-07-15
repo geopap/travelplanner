@@ -7,8 +7,10 @@ import {
   errorResponse,
   rateLimited,
   serverError,
+  sessionExpired,
   unauthorized,
 } from '@/lib/api/response';
+import { requireFreshSession } from '@/lib/api/auth-guard';
 
 type RouteCtx = { params: Promise<{ token: string }> };
 
@@ -55,6 +57,9 @@ export async function POST(
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) return unauthorized();
     const userId = auth.user.id;
+
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
 
     const rl = checkRateLimit(
       `inv-accept:${userId}`,
