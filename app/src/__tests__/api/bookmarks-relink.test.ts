@@ -65,6 +65,14 @@ vi.mock('@/lib/supabase/server', () => ({
   createSupabaseServerClient: async () => ({
     auth: {
       getUser: async () => ({ data: { user: sessionUser } }),
+      getSession: async () => ({
+        data: { session: { user: sessionUser, expires_at: Math.floor(Date.now() / 1000) + 3600 } },
+        error: null,
+      }),
+      refreshSession: async () => ({
+        data: { session: { user: sessionUser, expires_at: Math.floor(Date.now() / 1000) + 3600 } },
+        error: null,
+      }),
     },
     from: () => ({
       select: () => ({

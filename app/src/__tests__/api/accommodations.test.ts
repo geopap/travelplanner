@@ -154,6 +154,14 @@ vi.mock('@/lib/supabase/server', () => ({
   createSupabaseServerClient: async () => ({
     auth: {
       getUser: async () => ({ data: { user: { id: FIXED_USER_ID } } }),
+      getSession: async () => ({
+        data: { session: { user: { id: FIXED_USER_ID }, expires_at: Math.floor(Date.now() / 1000) + 3600 } },
+        error: null,
+      }),
+      refreshSession: async () => ({
+        data: { session: { user: { id: FIXED_USER_ID }, expires_at: Math.floor(Date.now() / 1000) + 3600 } },
+        error: null,
+      }),
     },
     from: (t: string) => makeChain(t),
   }),

@@ -15,9 +15,11 @@ import {
   forbidden,
   notFound,
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
 } from '@/lib/api/response';
+import { POSTGRES_RLS_VIOLATION_CODE, requireFreshSession } from '@/lib/api/auth-guard';
 import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
 
@@ -87,6 +89,9 @@ export async function PATCH(
     if (!access.ok) {
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
+
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
 
     // Verify the expense belongs to the URL's trip (defense-in-depth).
     const { data: existing, error: existingErr } = await supabase
@@ -213,6 +218,7 @@ export async function PATCH(
           400,
         );
       }
+      if (updateErr.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
       return serverError();
     }
 
@@ -262,6 +268,9 @@ export async function DELETE(
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
 
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
+
     const { data: existing, error: existingErr } = await supabase
       .from('expenses')
       .select('id, trip_id, amount, currency, category, occurred_at, source_kind')
@@ -284,7 +293,10 @@ export async function DELETE(
       .delete()
       .eq('id', expenseId)
       .eq('trip_id', tripId);
-    if (deleteErr) return serverError();
+    if (deleteErr) {
+      if (deleteErr.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
+      return serverError();
+    }
 
     await logAudit({
       actorId: userId,

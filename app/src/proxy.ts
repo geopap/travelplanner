@@ -1,8 +1,8 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createSupabaseMiddlewareClient } from './lib/supabase/middleware';
 
-const PROTECTED_PAGE_PREFIXES = ['/trips', '/account'];
-const PROTECTED_API_PREFIXES = ['/api/trips', '/api/account'];
+const PROTECTED_PAGE_PREFIXES = ['/trips', '/account', '/settings'];
+const PROTECTED_API_PREFIXES = ['/api/trips', '/api/account', '/api/profile'];
 
 function isApiPath(pathname: string): boolean {
   return pathname.startsWith('/api/');
@@ -52,7 +52,9 @@ export const config = {
   matcher: [
     '/trips/:path*',
     '/account/:path*',
+    '/settings/:path*',
     '/api/trips/:path*',
     '/api/account/:path*',
+    '/api/profile/:path*',
   ],
 };

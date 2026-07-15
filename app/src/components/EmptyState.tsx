@@ -23,7 +23,7 @@ export function EmptyState({
       ? (
         <Link
           href={ctaHref}
-          className="mt-6 inline-flex items-center justify-center h-10 px-5 rounded-full bg-zinc-900 text-white text-sm font-medium hover:bg-zinc-700 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200 transition-colors"
+          className="mt-6 inline-flex items-center justify-center h-10 px-5 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium dark:bg-indigo-500 dark:hover:bg-indigo-400 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-zinc-950"
         >
           {ctaLabel}
         </Link>
@@ -32,7 +32,7 @@ export function EmptyState({
         <button
           type="button"
           onClick={onCtaClick}
-          className="mt-6 inline-flex items-center justify-center h-10 px-5 rounded-full bg-zinc-900 text-white text-sm font-medium hover:bg-zinc-700 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200 transition-colors"
+          className="mt-6 inline-flex items-center justify-center h-10 px-5 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium dark:bg-indigo-500 dark:hover:bg-indigo-400 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-zinc-950"
         >
           {ctaLabel}
         </button>

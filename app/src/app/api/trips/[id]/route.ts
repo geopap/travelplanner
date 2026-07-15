@@ -5,14 +5,15 @@ import { UuidSchema, daysBetween } from '@/lib/validations/common';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import {
   badRequest,
-  conflict,
   errorResponse,
   forbidden,
   notFound,
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
 } from '@/lib/api/response';
+import { POSTGRES_RLS_VIOLATION_CODE, requireFreshSession } from '@/lib/api/auth-guard';
 import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
 import type { Trip } from '@/lib/types/domain';
@@ -64,6 +65,9 @@ export async function PATCH(
     if (!access.ok) {
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
+
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
 
     let body: unknown;
     try {
@@ -155,7 +159,10 @@ export async function PATCH(
       .eq('id', id)
       .select('*')
       .single();
-    if (updErr || !updated) return serverError();
+    if (updErr || !updated) {
+      if (updErr?.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
+      return serverError();
+    }
 
     // Extend days if dates expanded.
     const oldStart = existing.start_date as string;
@@ -185,7 +192,10 @@ export async function PATCH(
       }
       if (toAdd.length > 0) {
         const { error: insErr } = await supabase.from('trip_days').insert(toAdd);
-        if (insErr) return serverError();
+        if (insErr) {
+          if (insErr.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
+          return serverError();
+        }
       }
     }
 
@@ -221,6 +231,9 @@ export async function DELETE(
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
 
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
+
     const confirmHeader = request.headers.get('x-confirm-name');
     if (!confirmHeader) {
       return badRequest('Missing X-Confirm-Name header');
@@ -239,7 +252,10 @@ export async function DELETE(
     }
 
     const { error: delErr } = await supabase.from('trips').delete().eq('id', id);
-    if (delErr) return serverError();
+    if (delErr) {
+      if (delErr.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
+      return serverError();
+    }
 
     await logAudit({
       actorId: auth.user.id,

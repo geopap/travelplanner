@@ -36,6 +36,13 @@ export function AppHeader({ userEmail }: { userEmail?: string | null }) {
               {userEmail}
             </span>
           )}
+          <Link
+            href="/settings/profile"
+            aria-label="Profile settings"
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-indigo-100 text-sm font-semibold text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-950 dark:text-indigo-300 dark:hover:bg-indigo-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-zinc-950 transition-colors"
+          >
+            {userEmail ? userEmail.charAt(0).toUpperCase() : "?"}
+          </Link>
           <button
             type="button"
             onClick={onSignOut}

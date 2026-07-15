@@ -3,10 +3,12 @@ import { z } from 'zod';
 import { requireAuth } from '@/lib/supabase/server';
 import {
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
   notFound,
 } from '@/lib/api/response';
+import { requireFreshSession } from '@/lib/api/auth-guard';
 import { logAudit } from '@/lib/audit';
 import { UpdateProfileInput } from '@/lib/validations/profile';
 import type { Profile, ProfileUpdateResult } from '@/lib/types/profile';
@@ -41,6 +43,9 @@ export async function PATCH(req: Request): Promise<NextResponse> {
   try {
     const auth = await requireAuth();
     if (!auth) return unauthorized();
+
+    const fresh = await requireFreshSession(auth.supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
 
     let body: unknown;
     try {

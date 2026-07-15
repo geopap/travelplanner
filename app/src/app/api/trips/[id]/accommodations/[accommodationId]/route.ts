@@ -14,9 +14,11 @@ import {
   forbidden,
   notFound,
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
 } from '@/lib/api/response';
+import { requireFreshSession } from '@/lib/api/auth-guard';
 import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
 import { resolveGooglePlaceId } from '@/lib/supabase/place-resolver';
@@ -89,6 +91,9 @@ export async function PATCH(
     if (!access.ok) {
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
+
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
 
     // Verify the accommodation belongs to the URL's trip (defense-in-depth).
     const { data: existing, error: existingErr } = await supabase
@@ -359,6 +364,9 @@ export async function DELETE(
     if (!access.ok) {
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
+
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
 
     const { data: existing, error: existingErr } = await supabase
       .from('accommodations')

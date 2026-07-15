@@ -12,9 +12,11 @@ import {
   notFound,
   rateLimited,
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
 } from '@/lib/api/response';
+import { requireFreshSession } from '@/lib/api/auth-guard';
 import { UuidSchema, PageSchema } from '@/lib/validations/common';
 import { InvitationCreate } from '@/lib/validations/invitations';
 import { z } from 'zod';
@@ -69,6 +71,9 @@ export async function POST(
     if (!access.ok) {
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
+
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
 
     const rl = checkRateLimit(
       `inv-create:${userId}`,

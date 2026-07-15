@@ -692,6 +692,8 @@ Standard error envelope:
 ```
 Standard status codes: `400` (validation), `401` (unauthenticated), `403` (not a member / insufficient role), `404` (not found or not a member — both return 404 to avoid leaking existence), `409` (conflict), `429` (rate limit), `500` (server).
 
+**Session freshness (B-045 hotfix, 2026-07-15).** Every mutating route calls `requireFreshSession(supabase, user)` (`app/src/lib/api/auth-guard.ts`) after `getUser()` and before its first write. If the session's `expires_at` is within a 30s grace window (or past), the guard refreshes once via `refreshSession()`; if refresh fails or stays stale, the route returns `401` with `code: 'session_expired'` (a distinct `ApiErrorCode`). As defense-in-depth, hot-path mutation errors with Postgres code `42501` (RLS WITH-CHECK violation from a stale token) are also promoted from `500` to the same `401 session_expired`. The client fetch wrapper (`app/src/lib/fetch/api-client.ts`) intercepts `session_expired` and redirects to `/sign-in?redirect=<path>&notice=session_expired`. RLS note: `trips_insert` is hardened in migration `0024_harden_trips_insert_policy.sql` — `to authenticated with check (owner_id = (select auth.uid()))`.
+
 ### 4.1 Zod schema conventions (`app/src/lib/validations/`)
 
 ```ts

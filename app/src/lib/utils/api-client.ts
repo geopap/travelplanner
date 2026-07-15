@@ -2,7 +2,10 @@
 // Normalizes error envelopes per SOLUTION_DESIGN §4.
 
 import type { ApiError } from "@/lib/types/domain";
+import { apiFetch as rawApiFetch, SessionExpiredError } from "@/lib/fetch/api-client";
 import { dispatchEviction, parseTripScopedPath } from "@/lib/utils/eviction";
+
+export { SessionExpiredError } from "@/lib/fetch/api-client";
 
 export class ApiClientError extends Error {
   readonly status: number;
@@ -39,12 +42,24 @@ export async function apiFetch<T>(path: string, init: JsonInit = {}): Promise<T>
     payload = JSON.stringify(body);
   }
 
-  const response = await fetch(path, {
-    ...rest,
-    headers,
-    body: payload,
-    credentials: "same-origin",
-  });
+  // B-045: route through the shared wrapper so a `session_expired` 401
+  // redirects to /sign-in?redirect=<current path>. On redirect, hang the
+  // returned promise so caller catch blocks don't paint a stale error
+  // toast before the browser tears down the script context.
+  let response: Response;
+  try {
+    response = await rawApiFetch(path, {
+      ...rest,
+      headers,
+      body: payload,
+      credentials: "same-origin",
+    });
+  } catch (err) {
+    if (err instanceof SessionExpiredError) {
+      return new Promise<T>(() => {});
+    }
+    throw err;
+  }
 
   if (response.status === 204) {
     return undefined as T;

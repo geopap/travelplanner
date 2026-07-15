@@ -27,9 +27,11 @@ import {
   forbidden,
   notFound,
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
 } from '@/lib/api/response';
+import { requireFreshSession } from '@/lib/api/auth-guard';
 import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
 import type { MemberRole } from '@/lib/types/domain';
@@ -101,6 +103,9 @@ export async function PATCH(
       }
       return forbidden();
     }
+
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
 
     let body: unknown;
     try {
@@ -220,6 +225,9 @@ export async function DELETE(
       }
       return forbidden();
     }
+
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
     const callerRole: MemberRole = access.role;
     const isSelf = targetUserId === callerId;
 

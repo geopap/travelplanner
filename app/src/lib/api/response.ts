@@ -5,6 +5,7 @@ export type ApiErrorCode =
   | 'bad_request'
   | 'validation_error'
   | 'unauthorized'
+  | 'session_expired'
   | 'forbidden'
   | 'not_found'
   | 'conflict'
@@ -69,6 +70,20 @@ export function errorResponse(
 
 export function unauthorized(): NextResponse {
   return errorResponse('unauthorized', 'Unauthorized', 401);
+}
+
+/**
+ * B-045 — Structured 401 emitted when the access_token has expired and the
+ * server-side refresh could not produce a fresh session. The client fetch
+ * wrapper detects `code: 'session_expired'` and redirects to sign-in
+ * (carrying the existing `redirect` query param the sign-in page reads).
+ */
+export function sessionExpired(): NextResponse {
+  return errorResponse(
+    'session_expired',
+    'Your session has expired. Please sign in again.',
+    401,
+  );
 }
 
 export function forbidden(): NextResponse {

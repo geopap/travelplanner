@@ -68,10 +68,19 @@ function makeChain(table: string) {
   return chain;
 }
 
+// B-045: routes now call requireFreshSession after getUser; mock a fresh
+// session whose expires_at is far in the future so the guard short-circuits
+// without invoking refreshSession.
+const FRESH_SESSION = {
+  user: { id: FIXED_USER_ID },
+  expires_at: Math.floor(Date.now() / 1000) + 3600,
+};
 vi.mock('@/lib/supabase/server', () => ({
   createSupabaseServerClient: async () => ({
     auth: {
       getUser: async () => ({ data: { user: { id: FIXED_USER_ID } } }),
+      getSession: async () => ({ data: { session: FRESH_SESSION }, error: null }),
+      refreshSession: async () => ({ data: { session: FRESH_SESSION }, error: null }),
     },
     from: (table: string) => makeChain(table),
   }),

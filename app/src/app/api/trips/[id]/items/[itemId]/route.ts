@@ -14,9 +14,11 @@ import {
   forbidden,
   notFound,
   serverError,
+  sessionExpired,
   unauthorized,
   validationError,
 } from '@/lib/api/response';
+import { POSTGRES_RLS_VIOLATION_CODE, requireFreshSession } from '@/lib/api/auth-guard';
 import { checkTripAccess } from '@/lib/trip-access';
 import { logAudit } from '@/lib/audit';
 import type { Transportation } from '@/lib/types/transportation';
@@ -100,6 +102,9 @@ export async function PATCH(
     if (!access.ok) {
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
+
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
 
     let body: unknown;
     try {
@@ -227,6 +232,7 @@ export async function PATCH(
             400,
           );
         }
+        if (rpcErr.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
         return serverError();
       }
       const rpcParsed = UpdateTransportRpcResultSchema.safeParse(rpcRaw);
@@ -295,7 +301,10 @@ export async function PATCH(
       .eq('trip_id', id)
       .select('*')
       .maybeSingle();
-    if (error) return serverError();
+    if (error) {
+      if (error.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
+      return serverError();
+    }
     if (!data) return notFound();
 
     const dataParsed = ItineraryItemRowSchema.safeParse(data);
@@ -334,6 +343,9 @@ export async function DELETE(
       return access.reason === 'forbidden' ? forbidden() : notFound();
     }
 
+    const fresh = await requireFreshSession(supabase, auth.user);
+    if (!fresh.ok) return sessionExpired();
+
     // Read type before delete so we can choose the audit action; the
     // transportation row (if any) is removed via ON DELETE CASCADE.
     const { data: prior } = await supabase
@@ -356,7 +368,10 @@ export async function DELETE(
       .eq('trip_id', id)
       .select('id')
       .maybeSingle();
-    if (error) return serverError();
+    if (error) {
+      if (error.code === POSTGRES_RLS_VIOLATION_CODE) return sessionExpired();
+      return serverError();
+    }
     if (!data) return notFound();
 
     await logAudit({
